@@ -1,0 +1,175 @@
+    Updating crates.io index
+     Locking 21 packages to latest compatible versions
+    Updating bit-set v0.6.0 -> v0.8.0
+    Updating bit-vec v0.7.0 -> v0.8.0
+    Updating ecolor v0.29.1 -> v0.30.0
+    Updating egui v0.29.1 -> v0.30.0 (available: v0.33.3)
+    Updating egui-wgpu v0.29.1 -> v0.30.0 (available: v0.33.3)
+    Updating egui-winit v0.29.1 -> v0.30.0 (available: v0.33.3)
+    Updating emath v0.29.1 -> v0.30.0
+    Updating epaint v0.29.1 -> v0.30.0
+    Updating epaint_default_fonts v0.29.1 -> v0.30.0
+    Updating glow v0.13.1 -> v0.14.2
+    Updating naga v22.1.0 -> v23.1.0
+    Updating wgpu v22.1.0 -> v23.0.1
+    Updating wgpu-core v22.1.0 -> v23.0.1
+    Updating wgpu-hal v22.0.0 -> v23.0.1
+    Updating wgpu-types v22.0.0 -> v23.0.0
+    Updating windows v0.52.0 -> v0.58.0
+    Updating windows-core v0.52.0 -> v0.58.0
+      Adding windows-implement v0.58.0
+      Adding windows-interface v0.58.0
+      Adding windows-result v0.2.0
+      Adding windows-strings v0.1.0
+ Downloading crates ...
+  Downloaded egui-wgpu v0.30.0
+  Downloaded emath v0.30.0
+  Downloaded ecolor v0.30.0
+  Downloaded egui-winit v0.30.0
+  Downloaded wgpu-types v23.0.0
+  Downloaded epaint v0.30.0
+  Downloaded glow v0.14.2
+  Downloaded wgpu v23.0.1
+  Downloaded wgpu-core v23.0.1
+  Downloaded wgpu-hal v23.0.1
+  Downloaded egui v0.30.0
+  Downloaded naga v23.1.0
+  Downloaded epaint_default_fonts v0.30.0
+   Compiling naga v23.1.0
+    Checking emath v0.30.0
+   Compiling wgpu-hal v23.0.1
+   Compiling wgpu-core v23.0.1
+    Checking wgpu-types v23.0.0
+    Checking epaint_default_fonts v0.30.0
+    Checking glow v0.14.2
+   Compiling wgpu v23.0.1
+    Checking ecolor v0.30.0
+    Checking epaint v0.30.0
+    Checking egui v0.30.0
+    Checking egui-winit v0.30.0
+    Checking egui-wgpu v0.30.0
+    Checking vr_core v0.1.0 (/Users/karribrahmateja/Downloads/vrapp/vr_core)
+warning: unused imports: `ElementState`, `TouchPhase`, and `Touch`
+  --> src/lib.rs:11:20
+   |
+11 | use winit::event::{ElementState, Touch, TouchPhase, WindowEvent};
+   |                    ^^^^^^^^^^^^  ^^^^^  ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `BindGroupLayout`
+  --> src/renderer.rs:11:16
+   |
+11 |     BindGroup, BindGroupLayout, Buffer,
+   |                ^^^^^^^^^^^^^^^
+
+warning: unused import: `Vec3`
+  --> src/renderer.rs:15:24
+   |
+15 | use glam::{Mat4, Quat, Vec3};
+   |                        ^^^^
+
+warning: unused import: `warn`
+ --> src/sensors.rs:7:24
+  |
+7 | use log::{info, error, warn};
+  |                        ^^^^
+
+error[E0308]: mismatched types
+   --> src/renderer.rs:143:30
+    |
+143 |                 entry_point: "vs_main",
+    |                              ^^^^^^^^^ expected `Option<&str>`, found `&str`
+    |
+    = note:   expected enum `Option<&str>`
+            found reference `&'static str`
+help: try wrapping the expression in `Some`
+    |
+143 |                 entry_point: Some("vs_main"),
+    |                              +++++         +
+
+error[E0308]: mismatched types
+   --> src/renderer.rs:149:30
+    |
+149 |                 entry_point: "fs_main",
+    |                              ^^^^^^^^^ expected `Option<&str>`, found `&str`
+    |
+    = note:   expected enum `Option<&str>`
+            found reference `&'static str`
+help: try wrapping the expression in `Some`
+    |
+149 |                 entry_point: Some("fs_main"),
+    |                              +++++         +
+
+warning: use of deprecated method `egui::Context::begin_frame`: Renamed begin_pass
+   --> src/lib.rs:132:38
+    |
+132 |                     state.egui_ctx().begin_frame(raw_input);
+    |                                      ^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `egui::Context::end_frame`: Renamed end_pass
+   --> src/lib.rs:136:51
+    |
+136 |                     let output = state.egui_ctx().end_frame();
+    |                                                   ^^^^^^^^^
+
+error[E0597]: `encoder` does not live long enough
+   --> src/renderer.rs:263:39
+    |
+210 |         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+    |             ----------- binding `encoder` declared here
+...
+263 |                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    |                                       ^^^^^^^ borrowed value does not live long enough
+...
+278 |                 self.egui_renderer.render(&mut render_pass, &paint_jobs, &screen_descriptor);
+    |                 ---------------------------------------------------------------------------- argument requires that `encoder` is borrowed for `'static`
+...
+289 |     }
+    |     - `encoder` dropped here while still borrowed
+
+error[E0505]: cannot move out of `encoder` because it is borrowed
+   --> src/renderer.rs:287:43
+    |
+210 |         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+    |             ----------- binding `encoder` declared here
+...
+263 |                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    |                                       ------- borrow of `encoder` occurs here
+...
+278 |                 self.egui_renderer.render(&mut render_pass, &paint_jobs, &screen_descriptor);
+    |                 ---------------------------------------------------------------------------- argument requires that `encoder` is borrowed for `'static`
+...
+287 |         self.queue.submit(std::iter::once(encoder.finish()));
+    |                                           ^^^^^^^ move out of `encoder` occurs here
+
+warning: variable does not need to be mutable
+  --> src/sensors.rs:69:17
+   |
+69 |             let mut pt = b"com.vrapp.core\0".as_ptr();
+   |                 ----^^
+   |                 |
+   |                 help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `background`
+  --> src/ui.rs:66:13
+   |
+66 |         let background = Color32::from_rgb(15, 15, 20);
+   |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_background`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `window_id`
+   --> src/lib.rs:101:9
+    |
+101 |         window_id: WindowId,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_window_id`
+
+Some errors have detailed explanations: E0308, E0505, E0597.
+For more information about an error, try `rustc --explain E0308`.
+warning: `vr_core` (lib) generated 9 warnings
+error: could not compile `vr_core` (lib) due to 4 previous errors; 9 warnings emitted

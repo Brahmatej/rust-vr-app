@@ -9,15 +9,17 @@
     <!-- VR-related permissions -->
     <uses-feature android:glEsVersion="0x00030002" android:required="true" />
     <uses-feature android:name="android.hardware.vulkan.level" android:version="1" android:required="true" />
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
     <application
         android:label="VR Space"
-        android:hasCode="false"
+        android:hasCode="true"
         android:debuggable="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
         <activity
-            android:name="android.app.NativeActivity"
+            android:name=".MainActivity"
             android:label="VR Space"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:screenOrientation="landscape"

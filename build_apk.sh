@@ -60,6 +60,20 @@ echo "Adding native library to APK..."
 cd "$OUTPUT_DIR"
 zip -r "$UNSIGNED_APK" lib/
 
+# Compile Java
+echo "Compiling Java..."
+JAVAC_OPTS="-source 1.8 -target 1.8 -bootclasspath $PLATFORM/android.jar -d $OUTPUT_DIR/classes"
+mkdir -p "$OUTPUT_DIR/classes"
+javac $JAVAC_OPTS "$PROJECT_DIR/android/app/src/main/java/com/vrapp/core/MainActivity.java"
+
+echo "Dexing Java..."
+# Check for d8
+D8="$BUILD_TOOLS/d8"
+"$D8" --output "$OUTPUT_DIR" "$OUTPUT_DIR/classes/com/vrapp/core/"*.class
+
+echo "Adding classes.dex to APK..."
+zip -j "$UNSIGNED_APK" "$OUTPUT_DIR/classes.dex"
+
 # Align APK
 echo "Aligning APK..."
 "$ZIPALIGN" -f 4 "$UNSIGNED_APK" "$ALIGNED_APK"
