@@ -24,3 +24,5 @@ gilrs = "0.11"
 glam = "0.29"
 # Async runtime
 pollster = "0.4"
+# GPU buffer data
+bytemuck = { version = "1.14", features = ["derive"] }

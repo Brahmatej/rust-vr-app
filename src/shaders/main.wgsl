@@ -1,5 +1,13 @@
-// Basic WGSL shader for VR environment
-// Will be expanded to include glassmorphism effects and 3D panels
+// VR Shader with camera transform support
+// Supports stereoscopic rendering with view/projection matrices
+
+struct CameraUniforms {
+    view_proj: mat4x4<f32>,
+    eye_offset: vec4<f32>,  // x = left/right offset, y = is_vr_mode
+};
+
+@group(0) @binding(0)
+var<uniform> camera: CameraUniforms;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -8,11 +16,11 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    // Simple triangle for initial test
-    var positions = array<vec2<f32>, 3>(
-        vec2<f32>(0.0, 0.5),
-        vec2<f32>(-0.5, -0.5),
-        vec2<f32>(0.5, -0.5),
+    // Simple triangle in world space
+    var positions = array<vec3<f32>, 3>(
+        vec3<f32>(0.0, 0.5, -2.0),   // Top
+        vec3<f32>(-0.5, -0.5, -2.0), // Bottom left
+        vec3<f32>(0.5, -0.5, -2.0),  // Bottom right
     );
     
     var colors = array<vec3<f32>, 3>(
@@ -21,8 +29,12 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         vec3<f32>(0.8, 0.3, 1.0),  // Purple
     );
     
+    // Apply eye offset for stereo rendering
+    var world_pos = positions[vertex_index];
+    world_pos.x += camera.eye_offset.x;
+    
     var output: VertexOutput;
-    output.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    output.position = camera.view_proj * vec4<f32>(world_pos, 1.0);
     output.color = colors[vertex_index];
     return output;
 }
