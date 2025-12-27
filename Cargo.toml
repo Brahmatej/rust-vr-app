@@ -9,6 +9,8 @@ crate-type = ["cdylib"]
 [dependencies]
 # Android app framework
 android-activity = { version = "0.6", features = ["native-activity"] }
+# Android NDK sys bindings for sensors
+ndk-sys = "0.6"
 # Logging
 log = "0.4"
 android_logger = "0.14"

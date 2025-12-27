@@ -1,107 +1,241 @@
-//! Sensor module for Android gyroscope and accelerometer access
+//! Sensor module for Android gyroscope access via NDK
 //!
-//! For now, uses a simple approach without NDK sensor polling to avoid
-//! conflicts with android-activity's looper. Orientation is derived from
-//! the device's motion over time.
+//! Uses ndk-sys FFI bindings to access the Game Rotation Vector sensor,
+//! which is ideal for VR head tracking (no magnetic interference).
 
-use glam::{Quat, Vec3};
+use glam::Quat;
 use log::info;
+use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+// Sensor type constants
+const ASENSOR_TYPE_GAME_ROTATION_VECTOR: i32 = 15;
+const ASENSOR_TYPE_GYROSCOPE: i32 = 4;
 
 /// Manages sensor input for head tracking
-/// 
-/// Note: Full sensor access requires careful integration with android-activity's
-/// looper. For now, we use a simpler simulation-based approach for testing
-/// the VR rendering pipeline.
 pub struct SensorInput {
-    // Current orientation (quaternion)
+    sensor_manager: *mut ndk_sys::ASensorManager,
+    event_queue: *mut ndk_sys::ASensorEventQueue,
+    looper: *mut ndk_sys::ALooper,
+    
+    // Current orientation from sensors
     pub orientation: Quat,
     
-    // Euler angles for orientation
+    // Gyroscope data for integration
+    gyro_x: f32,
+    gyro_y: f32,
+    gyro_z: f32,
+    
+    // Accumulated rotation from gyroscope
     pitch: f32,
-    roll: f32,
     yaw: f32,
+    roll: f32,
     
-    // Simulated motion parameters
-    time: f32,
-    
-    // Sensor availability flag
-    sensors_available: bool,
+    initialized: bool,
 }
+
+// Safety: sensor pointers are used only from main thread
+unsafe impl Send for SensorInput {}
+unsafe impl Sync for SensorInput {}
 
 impl SensorInput {
     pub fn new() -> Self {
-        info!("Initializing sensor input (simulation mode)");
-        
-        Self {
+        let mut input = Self {
+            sensor_manager: ptr::null_mut(),
+            event_queue: ptr::null_mut(),
+            looper: ptr::null_mut(),
             orientation: Quat::IDENTITY,
+            gyro_x: 0.0,
+            gyro_y: 0.0,
+            gyro_z: 0.0,
             pitch: 0.0,
-            roll: 0.0,
             yaw: 0.0,
-            time: 0.0,
-            sensors_available: true, // Mark as available for VR mode to work
+            roll: 0.0,
+            initialized: false,
+        };
+        
+        input.init_sensors();
+        input
+    }
+    
+    fn init_sensors(&mut self) {
+        info!("Initializing gyroscope sensors...");
+        
+        unsafe {
+            // Get the sensor manager instance for this package
+            self.sensor_manager = ndk_sys::ASensorManager_getInstanceForPackage(
+                b"com.vrapp.core\0".as_ptr()
+            );
+            
+            if self.sensor_manager.is_null() {
+                info!("Failed to get ASensorManager, trying fallback");
+                // Fallback to deprecated getInstance
+                self.sensor_manager = ndk_sys::ASensorManager_getInstance();
+            }
+            
+            if self.sensor_manager.is_null() {
+                info!("ASensorManager not available");
+                return;
+            }
+            info!("Got ASensorManager");
+            
+            // Try Game Rotation Vector first (best for VR)
+            let mut sensor = ndk_sys::ASensorManager_getDefaultSensor(
+                self.sensor_manager,
+                ASENSOR_TYPE_GAME_ROTATION_VECTOR,
+            );
+            
+            if sensor.is_null() {
+                info!("Game Rotation Vector not available, trying gyroscope");
+                sensor = ndk_sys::ASensorManager_getDefaultSensor(
+                    self.sensor_manager,
+                    ASENSOR_TYPE_GYROSCOPE,
+                );
+            }
+            
+            if sensor.is_null() {
+                info!("No rotation sensors available");
+                return;
+            }
+            info!("Got rotation sensor");
+            
+            // Get or create a looper for this thread
+            self.looper = ndk_sys::ALooper_forThread();
+            if self.looper.is_null() {
+                self.looper = ndk_sys::ALooper_prepare(0);
+            }
+            
+            if self.looper.is_null() {
+                info!("Failed to get ALooper");
+                return;
+            }
+            info!("Got ALooper");
+            
+            // Create the sensor event queue
+            self.event_queue = ndk_sys::ASensorManager_createEventQueue(
+                self.sensor_manager,
+                self.looper,
+                0, // ident
+                None, // no callback
+                ptr::null_mut(),
+            );
+            
+            if self.event_queue.is_null() {
+                info!("Failed to create sensor event queue");
+                return;
+            }
+            info!("Created sensor event queue");
+            
+            // Enable the sensor
+            let result = ndk_sys::ASensorEventQueue_enableSensor(self.event_queue, sensor);
+            if result < 0 {
+                info!("Failed to enable sensor: {}", result);
+                return;
+            }
+            
+            // Set event rate to ~60Hz (16ms = 16000 microseconds)
+            ndk_sys::ASensorEventQueue_setEventRate(self.event_queue, sensor, 16000);
+            
+            self.initialized = true;
+            info!("Gyroscope sensors initialized successfully!");
         }
     }
     
-    /// Update orientation (simulates subtle head movement for testing)
+    /// Poll sensor events and update orientation
     pub fn update(&mut self, dt: f32) {
-        self.time += dt;
+        if !self.initialized || self.event_queue.is_null() {
+            // Fallback: gentle simulated motion
+            self.simulate_motion(dt);
+            return;
+        }
         
-        // For now, simulate a very gentle floating motion
-        // This helps verify the VR rendering is working correctly
-        // Real gyroscope integration will come in the next iteration
-        
-        // Subtle breathing-like motion
-        let breathing = (self.time * 0.5).sin() * 0.01;
-        self.pitch = breathing;
-        
-        // Very subtle sway
-        let sway = (self.time * 0.3).sin() * 0.005;
-        self.roll = sway;
-        
-        // Yaw stays fixed (no drift)
-        // self.yaw += 0.0;
-        
-        // Convert to quaternion
-        self.orientation = Quat::from_euler(
-            glam::EulerRot::YXZ,
-            self.yaw,
-            self.pitch,
-            self.roll,
-        );
+        unsafe {
+            // Poll events without blocking
+            let mut event: ndk_sys::ASensorEvent = std::mem::zeroed();
+            
+            // Get all pending events
+            while ndk_sys::ASensorEventQueue_getEvents(self.event_queue, &mut event, 1) > 0 {
+                match event.type_ {
+                    15 => {
+                        // Game Rotation Vector (quaternion directly!)
+                        // data[0] = x, data[1] = y, data[2] = z, data[3] = w (optional)
+                        let x = event.__bindgen_anon_1.__bindgen_anon_1.data[0];
+                        let y = event.__bindgen_anon_1.__bindgen_anon_1.data[1];
+                        let z = event.__bindgen_anon_1.__bindgen_anon_1.data[2];
+                        // Compute w from unit quaternion constraint
+                        let w = (1.0 - x*x - y*y - z*z).max(0.0).sqrt();
+                        self.orientation = Quat::from_xyzw(x, y, z, w).normalize();
+                    }
+                    4 => {
+                        // Gyroscope (rate of rotation in rad/s)
+                        self.gyro_x = event.__bindgen_anon_1.__bindgen_anon_1.data[0];
+                        self.gyro_y = event.__bindgen_anon_1.__bindgen_anon_1.data[1];
+                        self.gyro_z = event.__bindgen_anon_1.__bindgen_anon_1.data[2];
+                        
+                        // Integrate gyroscope to get orientation
+                        self.pitch += self.gyro_x * dt;
+                        self.yaw += self.gyro_z * dt;
+                        self.roll += self.gyro_y * dt;
+                        
+                        // Convert to quaternion
+                        self.orientation = Quat::from_euler(
+                            glam::EulerRot::YXZ,
+                            self.yaw,
+                            self.pitch,
+                            self.roll,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    
+    /// Fallback simulated motion when sensors unavailable
+    fn simulate_motion(&mut self, dt: f32) {
+        static mut TIME: f32 = 0.0;
+        unsafe {
+            TIME += dt;
+            let breathing = (TIME * 0.5).sin() * 0.01;
+            let sway = (TIME * 0.3).sin() * 0.005;
+            self.orientation = Quat::from_euler(
+                glam::EulerRot::YXZ,
+                0.0,
+                breathing,
+                sway,
+            );
+        }
     }
     
     /// Reset orientation to identity
     #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.pitch = 0.0;
-        self.roll = 0.0;
         self.yaw = 0.0;
+        self.roll = 0.0;
         self.orientation = Quat::IDENTITY;
-        info!("Orientation reset");
+        info!("Orientation reset to identity");
     }
     
     /// Check if sensors are available
     pub fn is_available(&self) -> bool {
-        self.sensors_available
-    }
-    
-    /// Set manual rotation (for testing or gamepad input)
-    #[allow(dead_code)]
-    pub fn set_rotation(&mut self, pitch: f32, yaw: f32, roll: f32) {
-        self.pitch = pitch;
-        self.yaw = yaw;
-        self.roll = roll;
-        self.orientation = Quat::from_euler(
-            glam::EulerRot::YXZ,
-            self.yaw,
-            self.pitch,
-            self.roll,
-        );
+        self.initialized
     }
 }
 
 impl Default for SensorInput {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for SensorInput {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.event_queue.is_null() && !self.sensor_manager.is_null() {
+                ndk_sys::ASensorManager_destroyEventQueue(self.sensor_manager, self.event_queue);
+            }
+        }
     }
 }
