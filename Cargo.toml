@@ -1,0 +1,26 @@
+[package]
+name = "vr_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Android app framework
+android-activity = { version = "0.6", features = ["native-activity"] }
+# Logging
+log = "0.4"
+android_logger = "0.14"
+# 3D rendering
+wgpu = "24"
+# Window/event handling
+winit = { version = "0.30", default-features = false, features = ["android-native-activity", "rwh_06"] }
+# Raw window handle for surface creation
+raw-window-handle = "0.6"
+# Gamepad input (PS5 controller)
+gilrs = "0.11"
+# Math for 3D
+glam = "0.29"
+# Async runtime
+pollster = "0.4"
