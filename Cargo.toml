@@ -35,3 +35,15 @@ egui-wgpu = "0.30"
 egui-winit = { version = "0.30", default-features = false, features = ["links"] }
 # JNI for Android Intent calls (File Picker)
 jni = "0.21"
+# GPU rendering with wgpu (Vulkan backend)
+wgpu = { version = "24", features = ["vulkan-portability"] }
+# Raw Vulkan access for AHardwareBuffer import
+ash = "0.38"
+# Android NDK (hardware_buffer is a module, not a feature)
+ndk = "0.9"
+# Dedicated hardware buffer wrappers
+hardware-buffer = "0.1"
+# libc for syscalls (fd close)
+libc = "0.2"
+# Note: mediacodec crate removed due to linker issues - will use ndk-sys directly later
+

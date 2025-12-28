@@ -11,6 +11,11 @@
     <uses-feature android:name="android.hardware.vulkan.level" android:version="1" android:required="true" />
     <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    
+    <!-- Storage permissions for video access -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
+
 
     <application
         android:label="VR Space"
@@ -21,7 +26,7 @@
         <activity
             android:name=".MainActivity"
             android:label="VR Space"
-            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation|uiMode|density"
             android:screenOrientation="landscape"
             android:exported="true">
 

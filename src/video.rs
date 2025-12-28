@@ -92,3 +92,61 @@ pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onVideoPicked(
         
     info!("JNI Native: Video Picked URI = {}", uri);
 }
+
+use std::sync::atomic::{AtomicI32, Ordering};
+
+/// Pending video file descriptor from Java (set by onVideoFdReady)
+pub static PENDING_VIDEO_FD: AtomicI32 = AtomicI32::new(-1);
+
+/// Check if there's a pending video fd
+pub fn get_pending_fd() -> Option<i32> {
+    let fd = PENDING_VIDEO_FD.swap(-1, Ordering::SeqCst);
+    if fd >= 0 { Some(fd) } else { None }
+}
+
+// JNI Export to receive file descriptor for NDK decoder
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onVideoFdReady(
+    _env: jni::JNIEnv,
+    _class: JObject,
+    fd: jni::sys::jint,
+) {
+    info!("JNI Native: Got video fd = {}", fd);
+    PENDING_VIDEO_FD.store(fd, Ordering::SeqCst);
+}
+
+/// Pause Java MediaPlayer audio
+pub fn pause_audio(app: &AndroidApp) {
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM).unwrap() };
+    let mut env = vm.attach_current_thread().unwrap();
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
+    
+    match env.call_method(&activity, "pauseAudio", "()V", &[]) {
+        Ok(_) => info!("Audio paused"),
+        Err(e) => error!("Failed to pause audio: {:?}", e),
+    }
+}
+
+/// Resume Java MediaPlayer audio
+pub fn resume_audio(app: &AndroidApp) {
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM).unwrap() };
+    let mut env = vm.attach_current_thread().unwrap();
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
+    
+    match env.call_method(&activity, "resumeAudio", "()V", &[]) {
+        Ok(_) => info!("Audio resumed"),
+        Err(e) => error!("Failed to resume audio: {:?}", e),
+    }
+}
+
+/// Seek Java MediaPlayer audio to position (milliseconds)
+pub fn seek_audio(app: &AndroidApp, position_ms: i32) {
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM).unwrap() };
+    let mut env = vm.attach_current_thread().unwrap();
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
+    
+    match env.call_method(&activity, "seekAudio", "(I)V", &[JValue::Int(position_ms)]) {
+        Ok(_) => info!("Audio seek to {}ms", position_ms),
+        Err(e) => error!("Failed to seek audio: {:?}", e),
+    }
+}

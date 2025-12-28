@@ -5,6 +5,9 @@
 use gilrs::{Gilrs, Button, Event, EventType};
 use glam::Vec2;
 use log::info;
+use winit::event::ElementState;
+use winit::keyboard::{Key, NamedKey};
+
 
 /// Controller state for cursor/interaction
 pub struct InputState {
@@ -14,6 +17,11 @@ pub struct InputState {
     pub right_stick: Vec2,
     pub primary_action: bool,   // Cross / Left Click
     pub secondary_action: bool, // Circle / Right Click
+    pub menu_action: bool,      // Options / Start / Menu
+    pub play_pause: bool,
+    pub seek_forward: bool,
+    pub seek_backward: bool,
+    pub zoom: bool,
 }
 
 impl InputState {
@@ -36,6 +44,11 @@ impl InputState {
             right_stick: Vec2::ZERO,
             primary_action: false,
             secondary_action: false,
+            menu_action: false,
+            play_pause: false,
+            seek_forward: false,
+            seek_backward: false,
+            zoom: false,
         }
     }
     
@@ -54,6 +67,7 @@ impl InputState {
         
         // Process collected events
         for event in events {
+            info!("RAW INPUT: {:?}", event);
             match event {
                 EventType::ButtonPressed(button, _) => {
                     self.handle_button(button, true);
@@ -75,8 +89,13 @@ impl InputState {
     
     fn handle_button(&mut self, button: Button, pressed: bool) {
         match button {
-            Button::South => self.primary_action = pressed,   // Cross on PS5
-            Button::East => self.secondary_action = pressed,  // Circle on PS5
+            Button::South => self.play_pause = pressed,       // X -> Play/Pause
+            Button::West => self.primary_action = pressed,    // Square -> Click
+            Button::East => self.secondary_action = pressed,  // Circle -> Back
+            Button::Start => self.menu_action = pressed,      // Options -> Menu UI
+            Button::RightTrigger2 => self.seek_forward = pressed, // R2 -> Seek Forward
+            Button::LeftTrigger2 => self.seek_backward = pressed, // L2 -> Seek Backward
+            Button::RightTrigger => self.zoom = pressed,      // R1 -> Zoom
             _ => {}
         }
     }
@@ -91,6 +110,21 @@ impl InputState {
             gilrs::Axis::RightStickX => self.right_stick.x = value,
             gilrs::Axis::RightStickY => self.right_stick.y = -value,
             _ => {}
+        }
+    }
+
+    pub fn handle_keyboard_input(&mut self, event: &winit::event::KeyEvent) {
+        let pressed = event.state == ElementState::Pressed;
+        match &event.logical_key {
+            Key::Named(NamedKey::Space) |
+            Key::Named(NamedKey::Enter) => self.play_pause = pressed,
+            
+            Key::Named(NamedKey::Escape) => self.menu_action = pressed,
+            
+            Key::Named(NamedKey::ArrowRight) => self.seek_forward = pressed,
+            Key::Named(NamedKey::ArrowLeft) => self.seek_backward = pressed,
+            
+             _ => {}
         }
     }
 }

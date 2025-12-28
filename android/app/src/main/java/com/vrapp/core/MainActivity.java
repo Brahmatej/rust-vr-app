@@ -8,10 +8,13 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.graphics.Bitmap;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
+
+import java.io.FileNotFoundException;
 
 public class MainActivity extends NativeActivity {
     private static final String TAG = "VRAppJava";
@@ -35,6 +38,10 @@ public class MainActivity extends NativeActivity {
     private volatile boolean isRunning = false;
     private final Object lock = new Object();
 
+    // For NDK decoder
+    private Uri currentVideoUri = null;
+    private ParcelFileDescriptor currentPfd = null;
+
     static {
         System.loadLibrary("vr_core");
     }
@@ -53,11 +60,14 @@ public class MainActivity extends NativeActivity {
     }
 
     public void launchVideoPicker() {
-        Log.i(TAG, "Launching Video Picker from Java...");
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        Log.i(TAG, "Launching Video Picker (Google Photos)...");
+        // ACTION_GET_CONTENT shows all content providers including Google Photos
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
         intent.setType("video/*");
-        startActivityForResult(intent, PICK_VIDEO_REQUEST);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        // Allow picking from external apps like Google Photos
+        intent.putExtra(Intent.EXTRA_LOCAL_ONLY, false);
+        startActivityForResult(Intent.createChooser(intent, "Select Video"), PICK_VIDEO_REQUEST);
     }
 
     @Override
@@ -76,10 +86,42 @@ public class MainActivity extends NativeActivity {
                 }
 
                 Log.i(TAG, "Selected Video URI: " + uri);
+                currentVideoUri = uri;
+
+                // Get file descriptor for NDK decoder
+                int fd = getVideoFd();
+                if (fd >= 0) {
+                    Log.i(TAG, "Got file descriptor: " + fd);
+                    onVideoFdReady(fd);
+                }
+
                 startVideo(uri);
                 onVideoPicked(uri.toString());
             }
         }
+    }
+
+    // Get file descriptor from current content:// URI
+    public int getVideoFd() {
+        if (currentVideoUri == null) {
+            return -1;
+        }
+        try {
+            // Close previous fd if any
+            if (currentPfd != null) {
+                try {
+                    currentPfd.close();
+                } catch (Exception e) {
+                }
+            }
+            currentPfd = getContentResolver().openFileDescriptor(currentVideoUri, "r");
+            if (currentPfd != null) {
+                return currentPfd.detachFd(); // Transfer ownership to native
+            }
+        } catch (FileNotFoundException e) {
+            Log.e(TAG, "Failed to open file: " + e);
+        }
+        return -1;
     }
 
     private void startVideo(Uri uri) {
@@ -247,6 +289,40 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    // Audio control methods for Rust JNI
+    public void pauseAudio() {
+        if (mediaPlayer != null && mediaPlayer.isPlaying()) {
+            try {
+                mediaPlayer.pause();
+                Log.i(TAG, "Audio paused");
+            } catch (Exception e) {
+                Log.e(TAG, "pauseAudio failed: " + e);
+            }
+        }
+    }
+
+    public void resumeAudio() {
+        if (mediaPlayer != null && !mediaPlayer.isPlaying()) {
+            try {
+                mediaPlayer.start();
+                Log.i(TAG, "Audio resumed");
+            } catch (Exception e) {
+                Log.e(TAG, "resumeAudio failed: " + e);
+            }
+        }
+    }
+
+    public void seekAudio(int positionMs) {
+        if (mediaPlayer != null) {
+            try {
+                mediaPlayer.seekTo(positionMs);
+                Log.i(TAG, "Audio seek to " + positionMs + "ms");
+            } catch (Exception e) {
+                Log.e(TAG, "seekAudio failed: " + e);
+            }
+        }
+    }
+
     // JNI methods
     public byte[] getVideoFrame() {
         if (hasVideo && frameBuffer != null) {
@@ -275,4 +351,20 @@ public class MainActivity extends NativeActivity {
     }
 
     public native void onVideoPicked(String uri);
+
+    public native void onVideoFdReady(int fd);
+
+    @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        // Log key events to debug controller
+        Log.i(TAG, "JAVA KEY: " + event.toString());
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
+    public boolean dispatchGenericMotionEvent(android.view.MotionEvent ev) {
+        // Log motion events (sticks, triggers)
+        Log.i(TAG, "JAVA MOTION: " + ev.toString());
+        return super.dispatchGenericMotionEvent(ev);
+    }
 }

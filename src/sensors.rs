@@ -190,7 +190,7 @@ impl SensorInput {
                             let w = event.__bindgen_anon_1.__bindgen_anon_1.data[3];
                             // Debug raw values
                             if loop_count % 30 == 0 {
-                                info!("DATA: {:.3} {:.3} {:.3} {:.3}", x, y, z, w);
+                                // info!("DATA: {:.3} {:.3} {:.3} {:.3}", x, y, z, w);
                             }
                             
                             // Use (-y, x) mapping to fix cross-talk

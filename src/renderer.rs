@@ -20,7 +20,8 @@ use bytemuck::{Pod, Zeroable};
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CameraUniforms {
     view_proj: [[f32; 4]; 4],
-    eye_offset: [f32; 4], // x = eye offset, y = is_vr_mode
+    eye_offset: [f32; 4], // x = eye offset, y = has_video, z = time, w = content_scale
+    video_info: [f32; 4], // x = aspect_ratio, y = width, z = height, w = unused
 }
 
 // Distortion uniforms
@@ -50,12 +51,23 @@ pub struct Renderer {
     camera_bind_group_layout: BindGroupLayout,
     
     // Video Texture
-    video_texture: Option<wgpu::Texture>,
-    video_texture_view: Option<wgpu::TextureView>,
+    video_texture_y: Option<wgpu::Texture>,
+    video_texture_y_view: Option<wgpu::TextureView>,
+    video_texture_uv: Option<wgpu::Texture>,
+    video_texture_uv_view: Option<wgpu::TextureView>,
     video_sampler: wgpu::Sampler,
-    video_bind_group: BindGroup,  // Always valid (placeholder or real)
-    video_bind_group_layout: BindGroupLayout,
+    video_bind_group: wgpu::BindGroup,  // Always valid (placeholder or real)
+    video_bind_group_layout: wgpu::BindGroupLayout,
     has_video: bool,
+    video_width: u32,
+    video_height: u32,
+    
+    // UI Texture (for Shader Overlay)
+    ui_texture: wgpu::Texture,
+    ui_texture_view: wgpu::TextureView,
+    
+    // UI Texture (for Shader Overlay)
+
     
     // Post Processing (Distortion)
     offscreen_texture: wgpu::Texture,
@@ -105,6 +117,11 @@ impl Renderer {
         }).await.expect("Failed to find GPU adapter");
         
         let (device, queue) = adapter.request_device(&DeviceDescriptor::default(), None).await.expect("Failed to create device");
+        
+        // Log wgpu errors instead of panicking
+        device.on_uncaptured_error(Box::new(|error| {
+            log::error!("WGPU ERROR: {:?}", error);
+        }));
         
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps.formats[0];
@@ -156,7 +173,8 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/main.wgsl").into()),
         });
 
-        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
+        // Create egui renderer with Rgba8UnormSrgb to match ui_texture format
+        let egui_renderer = egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, None, 1, false);
 
         // --- Video Texture Setup ---
         let video_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -172,6 +190,7 @@ impl Renderer {
         let video_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Video Bind Group Layout"),
             entries: &[
+                // Y texture
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -182,10 +201,33 @@ impl Renderer {
                     },
                     count: None,
                 },
+                // UV texture
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                // Sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // UI Texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
                     count: None,
                 },
             ],
@@ -224,24 +266,53 @@ impl Renderer {
             cache: None,
         });
 
-        // Create placeholder 1x1 video texture (required for bind group)
-        let placeholder_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Placeholder Video Texture"),
+        // Create UI Texture (Fixed high-res for VR clarity)
+        let ui_texture_size = wgpu::Extent3d { width: 2048, height: 2048, depth_or_array_layers: 1 };
+        let ui_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("UI Texture"),
+            size: ui_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb, // Match egui pipeline format
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let ui_texture_view = ui_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create placeholder 1x1 video textures (required for bind group)
+        let placeholder_texture_y = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Placeholder Video Texture Y"),
             size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format: wgpu::TextureFormat::R8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let placeholder_view = placeholder_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let placeholder_view_y = placeholder_texture_y.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let placeholder_texture_uv = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Placeholder Video Texture UV"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let placeholder_view_uv = placeholder_texture_uv.create_view(&wgpu::TextureViewDescriptor::default());
+
         let video_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Video Bind Group (Placeholder)"),
             layout: &video_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&placeholder_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&video_sampler) },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&placeholder_view_y) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&placeholder_view_uv) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&video_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&ui_texture_view) },
             ],
         });
 
@@ -369,12 +440,16 @@ impl Renderer {
             camera_bind_group_layout: bind_group_layout,
             
             // Video (placeholder initially)
-            video_texture: None,
-            video_texture_view: None,
+            video_texture_y: None,
+            video_texture_y_view: None,
+            video_texture_uv: None,
+            video_texture_uv_view: None,
             video_sampler,
-            video_bind_group,  // Placeholder bind group
+            video_bind_group,
             video_bind_group_layout,
             has_video: false,
+            video_width: 1920,  // Default 16:9
+            video_height: 1080,
             
             vr_mode: false,
             egui_renderer,
@@ -387,6 +462,8 @@ impl Renderer {
             distortion_bind_group_layout,
             distortion_buffer,
             start_time: std::time::Instant::now(),
+            ui_texture,
+            ui_texture_view,
         }
     }
     
@@ -426,61 +503,98 @@ impl Renderer {
         self.vr_mode = !self.vr_mode;
     }
     
-    /// Updates video texture with new frame data from Java
-    pub fn update_video_texture(&mut self, data: &[u8], width: u32, height: u32) {
-        // Create or recreate texture if size changed
-        let needs_new_texture = self.video_texture.is_none() || 
-            self.video_texture.as_ref().map(|t| {
-                let size = t.size();
-                size.width != width || size.height != height
-            }).unwrap_or(true);
-            
-        if needs_new_texture {
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Video Texture"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Video Bind Group"),
-                layout: &self.video_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.video_sampler) },
-                ],
-            });
-            
-            self.video_texture = Some(texture);
-            self.video_texture_view = Some(view);
-            self.video_bind_group = bind_group;
+    /// Creates Y and UV textures (R8 and Rg8)
+    fn create_video_texture(&mut self, width: u32, height: u32) {
+        if self.video_texture_y.is_some() && self.video_width == width && self.video_height == height {
+             return;
         }
+
+        let texture_y = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Video Texture Y"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
         
-        // Upload pixel data
-        if let Some(ref texture) = self.video_texture {
+        let texture_uv = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Video Texture UV"),
+            size: wgpu::Extent3d { width: width / 2, height: height / 2, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        
+        let view_y = texture_y.create_view(&wgpu::TextureViewDescriptor::default());
+        let view_uv = texture_uv.create_view(&wgpu::TextureViewDescriptor::default());
+        
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Video YUV Bind Group"),
+            layout: &self.video_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view_y) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view_uv) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.video_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.ui_texture_view) },
+            ],
+        });
+        
+        self.video_texture_y = Some(texture_y);
+        self.video_texture_y_view = Some(view_y);
+        self.video_texture_uv = Some(texture_uv);
+        self.video_texture_uv_view = Some(view_uv);
+        self.video_bind_group = bind_group;
+        self.video_width = width;
+        self.video_height = height;
+    }
+    
+    /// Updates video texture with new frame data from Java
+    pub fn update_video_texture(&mut self, y_data: &[u8], uv_data: &[u8], width: u32, height: u32) {
+        if self.video_texture_y.is_none() || self.video_width != width || self.video_height != height {
+            self.create_video_texture(width, height);
+            self.has_video = true;
+        }
+
+        if let Some(ref texture_y) = self.video_texture_y {
             self.queue.write_texture(
                 wgpu::ImageCopyTexture {
-                    texture,
+                    texture: texture_y,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                data,
+                y_data,
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(width * 4),
+                    bytes_per_row: Some(width),
                     rows_per_image: Some(height),
                 },
                 wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             );
-            self.has_video = true;
+        }
+        
+        if let Some(ref texture_uv) = self.video_texture_uv {
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: texture_uv,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                uv_data,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width), // UV width is width/2 but bytes per pixel is 2 (Rg8), so stride is same as Y plane width
+                    rows_per_image: Some(height / 2),
+                },
+                wgpu::Extent3d { width: width / 2, height: height / 2, depth_or_array_layers: 1 },
+            );
         }
     }
     
@@ -530,8 +644,74 @@ impl Renderer {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
+
+        // 1. Render UI to Texture (Always render, even if empty/hidden, to clear texture)
+        {
+            // Clear UI Texture
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("UI Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ui_texture_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
         
-        // 1. Clear Screen
+        if let Some((ctx, ref full_output)) = ui_data {
+            // For ui_texture pass, use texture dimensions (2048x2048)
+            // The direct screen pass later will use screen size
+            let screen_descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [2048, 2048],
+                pixels_per_point: ctx.pixels_per_point(),
+            };
+            
+            let paint_jobs = ctx.tessellate(full_output.shapes.clone(), full_output.pixels_per_point);
+            
+            for (id, delta) in &full_output.textures_delta.set {
+                self.egui_renderer.update_texture(&self.device, &self.queue, *id, delta);
+            }
+            
+            self.egui_renderer.update_buffers(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &paint_jobs,
+                &screen_descriptor,
+            );
+            
+            {
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("UI Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.ui_texture_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load, // Load the cleared transparent texture
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                
+                let render_pass_static: &mut wgpu::RenderPass<'static> = unsafe { std::mem::transmute(&mut render_pass) };
+                self.egui_renderer.render(render_pass_static, &paint_jobs, &screen_descriptor);
+            }
+            
+            for id in &full_output.textures_delta.free {
+                self.egui_renderer.free_texture(id);
+            }
+        }
+        
+        // 2. Clear Screen
         {
             let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Clear Pass"),
@@ -549,7 +729,7 @@ impl Renderer {
             });
         }
         
-        // 2. Render 3D Scene
+        // 3. Render 3D Scene
         if self.vr_mode {
             self.render_eye(&mut encoder, target_view, head_orientation, -Self::IPD / 2.0, 0, lens_offset_val, content_scale); 
             self.render_eye(&mut encoder, target_view, head_orientation, Self::IPD / 2.0, 1, lens_offset_val, content_scale);  
@@ -557,7 +737,7 @@ impl Renderer {
             self.render_eye(&mut encoder, target_view, head_orientation, 0.0, 2, 0.0, content_scale); 
         }
         
-        // 3. Distortion Pass
+        // 4. Distortion Pass
         if self.vr_mode {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Distortion Pass"),
@@ -579,19 +759,19 @@ impl Renderer {
             render_pass.draw(0..6, 0..1);
         }
         
-        // 4. UI Overlay
-        if let Some((ctx, full_output)) = ui_data {
+        // 5. Direct Screen UI Overlay (after distortion/scene, overlays on top)
+        if let Some((ctx, ref full_output)) = ui_data {
+            let (width, height) = self.size;
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
-                size_in_pixels: [self.config.width, self.config.height],
+                size_in_pixels: [width, height],
                 pixels_per_point: ctx.pixels_per_point(),
             };
             
-            let paint_jobs = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+            // Re-tessellate for screen size (different from ui_texture size)
+            let paint_jobs = ctx.tessellate(full_output.shapes.clone(), full_output.pixels_per_point);
+            log::info!("UI Direct Screen Pass: {} paint jobs, screen {}x{}", paint_jobs.len(), width, height);
             
-            for (id, delta) in &full_output.textures_delta.set {
-                self.egui_renderer.update_texture(&self.device, &self.queue, *id, delta);
-            }
-            
+            // The textures were already updated in the first pass, just need to update buffers
             self.egui_renderer.update_buffers(
                 &self.device,
                 &self.queue,
@@ -602,12 +782,12 @@ impl Renderer {
             
             {
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("UI Render Pass"),
+                    label: Some("UI Direct Screen Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view: &view, // Render directly to swapchain
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
+                            load: wgpu::LoadOp::Load, // Preserve existing content
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -618,10 +798,6 @@ impl Renderer {
                 
                 let render_pass_static: &mut wgpu::RenderPass<'static> = unsafe { std::mem::transmute(&mut render_pass) };
                 self.egui_renderer.render(render_pass_static, &paint_jobs, &screen_descriptor);
-            }
-            
-            for id in &full_output.textures_delta.free {
-                self.egui_renderer.free_texture(id);
             }
         }
         
@@ -685,6 +861,8 @@ impl Renderer {
             view_proj: view_proj.to_cols_array_2d(),
             // Pass has_video in .y, Time in .z, Content Scale in .w
             eye_offset: [dynamic_offset, if self.has_video { 1.0 } else { 0.0 }, self.start_time.elapsed().as_secs_f32(), content_scale],
+            // Video aspect ratio (width/height)
+            video_info: [self.video_width as f32 / self.video_height as f32, self.video_width as f32, self.video_height as f32, 0.0],
         };
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniforms));
         

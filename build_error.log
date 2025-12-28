@@ -1,0 +1,257 @@
+    Building arm64-v8a (aarch64-linux-android)
+   Compiling vr_core v0.1.0 (/Users/karribrahmateja/Downloads/vrapp/vr_core)
+warning: unused imports: `ElementState` and `Touch`
+  --> src/lib.rs:11:20
+   |
+11 | use winit::event::{ElementState, Touch, TouchPhase, WindowEvent};
+   |                    ^^^^^^^^^^^^  ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Vec3`
+  --> src/renderer.rs:15:24
+   |
+15 | use glam::{Mat4, Quat, Vec3};
+   |                        ^^^^
+
+warning: unused import: `warn`
+ --> src/sensors.rs:7:24
+  |
+7 | use log::{info, error, warn};
+  |                        ^^^^
+
+warning: unused import: `Shadow`
+ --> src/ui.rs:1:72
+  |
+1 | use egui::{Context, Visuals, Style, Rounding, Color32, Margin, Stroke, Shadow, FontId, FontFamily};
+  |                                                                        ^^^^^^
+
+warning: unused import: `warn`
+  --> src/video_ndk.rs:12:17
+   |
+12 | use log::{info, warn, error};
+   |                 ^^^^
+
+error[E0124]: field `ui_texture` is already declared
+  --> src/renderer.rs:70:5
+   |
+66 |     ui_texture: wgpu::Texture,
+   |     ------------------------- `ui_texture` first declared here
+...
+70 |     ui_texture: wgpu::Texture,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^ field already declared
+
+error[E0124]: field `ui_texture_view` is already declared
+  --> src/renderer.rs:71:5
+   |
+67 |     ui_texture_view: wgpu::TextureView,
+   |     ---------------------------------- `ui_texture_view` first declared here
+...
+71 |     ui_texture_view: wgpu::TextureView,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field already declared
+
+warning: use of deprecated method `egui::Context::begin_frame`: Renamed begin_pass
+   --> src/lib.rs:244:38
+    |
+244 |                     state.egui_ctx().begin_frame(raw_input);
+    |                                      ^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `egui::Context::end_frame`: Renamed end_pass
+   --> src/lib.rs:250:51
+    |
+250 |                     let output = state.egui_ctx().end_frame();
+    |                                                   ^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> src/renderer.rs:646:17
+    |
+646 |             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    |                 ----^^^^^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `render_pass`
+   --> src/renderer.rs:646:17
+    |
+646 |             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    |                 ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_render_pass`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> src/sensors.rs:81:17
+   |
+81 |             let mut pt = b"com.vrapp.core\0".as_ptr();
+   |                 ----^^
+   |                 |
+   |                 help: remove this `mut`
+
+warning: unused variable: `background`
+  --> src/ui.rs:90:13
+   |
+90 |         let background = Color32::from_rgb(15, 15, 20);
+   |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_background`
+
+warning: variable does not need to be mutable
+   --> src/video_ndk.rs:220:13
+    |
+220 |         let mut uv_data = vec![128u8; uv_size]; // Grayscale
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `frame_size`
+   --> src/video_ndk.rs:201:9
+    |
+201 |     let frame_size = (width * height * 4) as usize;
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_frame_size`
+
+warning: variable does not need to be mutable
+   --> src/video_ndk.rs:327:13
+    |
+327 |         let mut frames_for_estimation = 0;
+    |             ----^^^^^^^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/video_ndk.rs:328:13
+    |
+328 |         let mut previous_pts: i64 = -1;
+    |             ----^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/video_ndk.rs:329:13
+    |
+329 |         let mut accumulated_delta: i64 = 0;
+    |             ----^^^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/video_ndk.rs:330:13
+    |
+330 |         let mut samples_count: i64 = 0;
+    |             ----^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/video_ndk.rs:331:13
+    |
+331 |         let mut target_interval_ms: u64 = 33; // Start with 30fps assumption
+    |             ----^^^^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/video_ndk.rs:332:13
+    |
+332 |         let mut next_frame_target = std::time::Instant::now();
+    |             ----^^^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `frames_for_estimation`
+   --> src/video_ndk.rs:327:13
+    |
+327 |         let mut frames_for_estimation = 0;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_frames_for_estimation`
+
+warning: unused variable: `previous_pts`
+   --> src/video_ndk.rs:328:13
+    |
+328 |         let mut previous_pts: i64 = -1;
+    |             ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_previous_pts`
+
+warning: unused variable: `accumulated_delta`
+   --> src/video_ndk.rs:329:13
+    |
+329 |         let mut accumulated_delta: i64 = 0;
+    |             ^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_accumulated_delta`
+
+warning: unused variable: `samples_count`
+   --> src/video_ndk.rs:330:13
+    |
+330 |         let mut samples_count: i64 = 0;
+    |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_samples_count`
+
+warning: unused variable: `target_interval_ms`
+   --> src/video_ndk.rs:331:13
+    |
+331 |         let mut target_interval_ms: u64 = 33; // Start with 30fps assumption
+    |             ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_target_interval_ms`
+
+warning: unused variable: `next_frame_target`
+   --> src/video_ndk.rs:332:13
+    |
+332 |         let mut next_frame_target = std::time::Instant::now();
+    |             ^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_next_frame_target`
+
+warning: unused variable: `start_time`
+   --> src/video_ndk.rs:374:13
+    |
+374 |         let start_time = std::time::Instant::now();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_start_time`
+
+warning: unused variable: `rgba`
+   --> src/video_ndk.rs:453:25
+    |
+453 |                     let rgba = convert_yuv_to_rgba(yuv_data, width as u32, height as u32);
+    |                         ^^^^ help: if this is intentional, prefix it with an underscore: `_rgba`
+
+warning: variable does not need to be mutable
+   --> src/video_ndk.rs:615:13
+    |
+615 |         let mut first_frame = true;
+    |             ----^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `first_frame`
+   --> src/video_ndk.rs:615:13
+    |
+615 |         let mut first_frame = true;
+    |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_first_frame`
+
+warning: value assigned to `start_time` is never read
+   --> src/video_ndk.rs:611:30
+    |
+611 |         let mut start_time = std::time::Instant::now();
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `start_time` is never read
+   --> src/video_ndk.rs:648:25
+    |
+648 |                         start_time = adjusted_start;
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `window_id`
+   --> src/lib.rs:139:9
+    |
+139 |         window_id: WindowId,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_window_id`
+
+warning: unused variable: `frame`
+   --> src/lib.rs:405:40
+    |
+405 |                     } else if let Some(frame) = video::VideoManager::get_video_frame(&self.app) {
+    |                                        ^^^^^ help: if this is intentional, prefix it with an underscore: `_frame`
+
+For more information about this error, try `rustc --explain E0124`.
+warning: `vr_core` (lib) generated 33 warnings
+error: could not compile `vr_core` (lib) due to 2 previous errors; 33 warnings emitted
+note: If the build failed due to a missing target, you can run this command:
+note: 
+note:     rustup target install aarch64-linux-android

@@ -20,6 +20,7 @@ mod window_manager;
 mod sensors;
 mod ui;
 mod video;
+mod video_ndk;
 
 /// Main application state
 struct VRApp {
@@ -37,6 +38,8 @@ struct VRApp {
     touches: std::collections::HashMap<u64, (f64, f64)>,
     initial_pinch_distance: Option<f64>,
     initial_content_scale: f32,
+    // NDK Video Decoder
+    ndk_decoder: Option<video_ndk::NdkVideoDecoder>,
 }
 
 impl VRApp {
@@ -52,6 +55,7 @@ impl VRApp {
             touches: std::collections::HashMap::new(),
             initial_pinch_distance: None,
             initial_content_scale: 1.0,
+            ndk_decoder: None,
         }
     }
 }
@@ -227,9 +231,16 @@ impl ApplicationHandler for VRApp {
                         .map(|ui| ui.params.content_scale)
                         .unwrap_or(1.0);
                     
-                    // Fetch video frame from Java and upload to GPU
-                    if let Some(frame) = video::VideoManager::get_video_frame(&self.app) {
-                        renderer.update_video_texture(&frame.data, frame.width, frame.height);
+                    // Fetch video frame from NDK decoder (Y+UV planes)
+                    if let Some(decoder) = &self.ndk_decoder {
+                        if let Some((y_data, uv_data, width, height)) = decoder.get_frame() {
+                            if !y_data.is_empty() {
+                                renderer.update_video_texture(&y_data, &uv_data, width, height);
+                            }
+                        }
+                    } else if let Some(frame) = video::VideoManager::get_video_frame(&self.app) {
+                        // Fallback path for Java-based video (not used with NDK decoder)
+                        let _ = frame; // NDK path is preferred
                     }
                         
                     renderer.render(orientation, ui_data, distortion_params, content_scale);
