@@ -13,6 +13,9 @@ import android.util.Log;
 import android.graphics.Bitmap;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
+import android.media.AudioManager;
+import android.view.MotionEvent;
+import android.view.InputDevice;
 
 import java.io.FileNotFoundException;
 
@@ -57,6 +60,95 @@ public class MainActivity extends NativeActivity {
         wakeLock.acquire();
 
         Log.i(TAG, "MainActivity created - wake lock acquired");
+    }
+
+    // D-pad state tracking for volume control
+    private float lastHatX = 0f;
+    private float lastHatY = 0f;
+    private long lastVolumeChangeTime = 0;
+
+    // Called from Rust to check D-pad and adjust volume
+    // Since NativeActivity consumes gamepad events, we poll via physical button
+    // simulation
+    public void checkVolumeButtons(boolean left, boolean right) {
+        long now = System.currentTimeMillis();
+        // Debounce: only change volume every 200ms
+        if (now - lastVolumeChangeTime < 200)
+            return;
+
+        if (left) {
+            volumeDown();
+            lastVolumeChangeTime = now;
+            Log.i(TAG, "Volume DOWN via native D-pad");
+        }
+        if (right) {
+            volumeUp();
+            lastVolumeChangeTime = now;
+            Log.i(TAG, "Volume UP via native D-pad");
+        }
+    }
+
+    // Poll D-pad HAT axis state and adjust volume (called from Rust render loop)
+    // This bypasses NativeActivity's input consumption
+    private int cachedGamepadDeviceId = -1;
+
+    public void pollDpadForVolume() {
+        // Find gamepad if not cached
+        if (cachedGamepadDeviceId == -1) {
+            int[] deviceIds = android.view.InputDevice.getDeviceIds();
+            for (int id : deviceIds) {
+                android.view.InputDevice device = android.view.InputDevice.getDevice(id);
+                if (device != null &&
+                        (device.getSources()
+                                & android.view.InputDevice.SOURCE_GAMEPAD) == android.view.InputDevice.SOURCE_GAMEPAD) {
+                    cachedGamepadDeviceId = id;
+                    Log.i(TAG, "Found gamepad: " + device.getName() + " id=" + id);
+                    break;
+                }
+            }
+        }
+
+        if (cachedGamepadDeviceId == -1)
+            return;
+
+        // Unfortunately InputDevice API doesn't give us current axis values
+        // We can only get motion ranges, not live values
+        // Need to use View.onGenericMotionEvent or InputEventReceiver instead
+        // For now, this won't work - keeping for reference
+    }
+
+    // Alternative: Use InputEventReceiver in a Looper thread
+    // This is complex - simpler to fix native input handling
+
+    // Volume Control Methods
+    public void volumeUp() {
+        AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        int current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+        int max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+        if (current < max) {
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, current + 1, AudioManager.FLAG_SHOW_UI);
+        }
+        Log.i(TAG, "Volume Up: " + (current + 1) + "/" + max);
+    }
+
+    public void volumeDown() {
+        AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        int current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+        int max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+        if (current > 0) {
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, current - 1, AudioManager.FLAG_SHOW_UI);
+        }
+        Log.i(TAG, "Volume Down: " + (current - 1) + "/" + max);
+    }
+
+    public int getVolume() {
+        AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        return audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+    }
+
+    public int getMaxVolume() {
+        AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        return audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
     }
 
     public void launchVideoPicker() {
@@ -290,6 +382,37 @@ public class MainActivity extends NativeActivity {
     }
 
     // Audio control methods for Rust JNI
+
+    // Start audio from a file path (called by file browser)
+    public void startAudioFromPath(String filePath) {
+        Log.i(TAG, "startAudioFromPath: " + filePath);
+
+        // Stop existing audio
+        if (mediaPlayer != null) {
+            try {
+                mediaPlayer.release();
+            } catch (Exception e) {
+            }
+            mediaPlayer = null;
+        }
+
+        try {
+            mediaPlayer = new MediaPlayer();
+            mediaPlayer.setDataSource(filePath);
+            mediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+                @Override
+                public void onPrepared(MediaPlayer mp) {
+                    Log.i(TAG, "Audio ready from path");
+                    mp.start();
+                    mp.setLooping(true);
+                }
+            });
+            mediaPlayer.prepareAsync();
+        } catch (Exception e) {
+            Log.e(TAG, "startAudioFromPath failed: " + e);
+        }
+    }
+
     public void pauseAudio() {
         if (mediaPlayer != null && mediaPlayer.isPlaying()) {
             try {
@@ -354,17 +477,100 @@ public class MainActivity extends NativeActivity {
 
     public native void onVideoFdReady(int fd);
 
+    // Native methods for gamepad input
+    public native void onGamepadButton(int buttonCode, boolean pressed);
+
+    public native void onGamepadAxis(float leftX, float leftY, float rightX, float rightY, float l2, float r2);
+
     @Override
     public boolean dispatchKeyEvent(android.view.KeyEvent event) {
-        // Log key events to debug controller
-        Log.i(TAG, "JAVA KEY: " + event.toString());
+        // Check if this is a gamepad/joystick source
+        int source = event.getSource();
+        if ((source & android.view.InputDevice.SOURCE_GAMEPAD) == android.view.InputDevice.SOURCE_GAMEPAD ||
+                (source & android.view.InputDevice.SOURCE_JOYSTICK) == android.view.InputDevice.SOURCE_JOYSTICK) {
+
+            int keyCode = event.getKeyCode();
+            boolean pressed = (event.getAction() == android.view.KeyEvent.ACTION_DOWN);
+
+            Log.i(TAG, "GAMEPAD KEY: code=" + keyCode + " pressed=" + pressed);
+
+            // D-pad handling for volume (KeyEvent codes 19-22)
+            if (pressed) {
+                switch (keyCode) {
+                    case android.view.KeyEvent.KEYCODE_DPAD_LEFT:
+                        volumeDown();
+                        Log.i(TAG, "D-pad LEFT KeyEvent: Volume Down");
+                        break;
+                    case android.view.KeyEvent.KEYCODE_DPAD_RIGHT:
+                        volumeUp();
+                        Log.i(TAG, "D-pad RIGHT KeyEvent: Volume Up");
+                        break;
+                }
+            }
+
+            // Call Rust native method
+            onGamepadButton(keyCode, pressed);
+
+            // Don't consume - let system also handle
+            return true;
+        }
         return super.dispatchKeyEvent(event);
     }
 
     @Override
-    public boolean dispatchGenericMotionEvent(android.view.MotionEvent ev) {
-        // Log motion events (sticks, triggers)
-        Log.i(TAG, "JAVA MOTION: " + ev.toString());
-        return super.dispatchGenericMotionEvent(ev);
+    public boolean dispatchGenericMotionEvent(android.view.MotionEvent event) {
+        Log.i(TAG, "dispatchGenericMotionEvent CALLED! source=" + event.getSource());
+
+        // Check if this is a joystick/gamepad motion
+        int source = event.getSource();
+        if ((source & android.view.InputDevice.SOURCE_JOYSTICK) == android.view.InputDevice.SOURCE_JOYSTICK ||
+                (source & android.view.InputDevice.SOURCE_GAMEPAD) == android.view.InputDevice.SOURCE_GAMEPAD) {
+
+            if (event.getAction() == android.view.MotionEvent.ACTION_MOVE) {
+                // Left stick
+                float leftX = event.getAxisValue(android.view.MotionEvent.AXIS_X);
+                float leftY = event.getAxisValue(android.view.MotionEvent.AXIS_Y);
+
+                // Right stick
+                float rightX = event.getAxisValue(android.view.MotionEvent.AXIS_Z);
+                float rightY = event.getAxisValue(android.view.MotionEvent.AXIS_RZ);
+
+                // Triggers (L2/R2)
+                float l2 = event.getAxisValue(android.view.MotionEvent.AXIS_LTRIGGER);
+                float r2 = event.getAxisValue(android.view.MotionEvent.AXIS_RTRIGGER);
+
+                // If LTRIGGER/RTRIGGER is 0, try BRAKE/GAS (some controllers use these)
+                if (l2 == 0)
+                    l2 = event.getAxisValue(android.view.MotionEvent.AXIS_BRAKE);
+                if (r2 == 0)
+                    r2 = event.getAxisValue(android.view.MotionEvent.AXIS_GAS);
+
+                // D-pad via HAT axes (PS5 DualSense uses this)
+                float hatX = event.getAxisValue(android.view.MotionEvent.AXIS_HAT_X);
+                float hatY = event.getAxisValue(android.view.MotionEvent.AXIS_HAT_Y);
+
+                // D-pad Left/Right for volume control
+                if (hatX != lastHatX) {
+                    if (hatX < -0.5f) {
+                        volumeDown();
+                        Log.i(TAG, "D-pad LEFT: Volume Down");
+                    } else if (hatX > 0.5f) {
+                        volumeUp();
+                        Log.i(TAG, "D-pad RIGHT: Volume Up");
+                    }
+                    lastHatX = hatX;
+                }
+                lastHatY = hatY;
+
+                // Log.i(TAG, "GAMEPAD AXIS: LX=" + leftX + " LY=" + leftY + " RX=" + rightX + "
+                // RY=" + rightY + " L2=" + l2 + " R2=" + r2);
+
+                // Call Rust native method
+                onGamepadAxis(leftX, leftY, rightX, rightY, l2, r2);
+
+                return true;
+            }
+        }
+        return super.dispatchGenericMotionEvent(event);
     }
 }

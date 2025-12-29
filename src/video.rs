@@ -115,6 +115,20 @@ pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onVideoFdReady(
     PENDING_VIDEO_FD.store(fd, Ordering::SeqCst);
 }
 
+/// Start audio from file path (for file browser selections)
+pub fn start_audio_from_path(app: &AndroidApp, path: &str) {
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM).unwrap() };
+    let mut env = vm.attach_current_thread().unwrap();
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
+    
+    let path_jstr = env.new_string(path).unwrap();
+    
+    match env.call_method(&activity, "startAudioFromPath", "(Ljava/lang/String;)V", &[JValue::Object(&path_jstr.into())]) {
+        Ok(_) => info!("Audio started from path: {}", path),
+        Err(e) => error!("Failed to start audio: {:?}", e),
+    }
+}
+
 /// Pause Java MediaPlayer audio
 pub fn pause_audio(app: &AndroidApp) {
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM).unwrap() };
@@ -148,5 +162,44 @@ pub fn seek_audio(app: &AndroidApp, position_ms: i32) {
     match env.call_method(&activity, "seekAudio", "(I)V", &[JValue::Int(position_ms)]) {
         Ok(_) => info!("Audio seek to {}ms", position_ms),
         Err(e) => error!("Failed to seek audio: {:?}", e),
+    }
+}
+
+/// Increase system media volume
+pub fn volume_up(app: &AndroidApp) {
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM).unwrap() };
+    let mut env = vm.attach_current_thread().unwrap();
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
+    
+    match env.call_method(&activity, "volumeUp", "()V", &[]) {
+        Ok(_) => info!("Volume up"),
+        Err(e) => error!("Failed to increase volume: {:?}", e),
+    }
+}
+
+/// Decrease system media volume
+pub fn volume_down(app: &AndroidApp) {
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM).unwrap() };
+    let mut env = vm.attach_current_thread().unwrap();
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
+    
+    match env.call_method(&activity, "volumeDown", "()V", &[]) {
+        Ok(_) => info!("Volume down"),
+        Err(e) => error!("Failed to decrease volume: {:?}", e),
+    }
+}
+
+/// Check D-pad volume buttons (called from game loop with HAT values)
+pub fn check_volume_buttons(app: &AndroidApp, left: bool, right: bool) {
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM).unwrap() };
+    let mut env = vm.attach_current_thread().unwrap();
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
+    
+    match env.call_method(&activity, "checkVolumeButtons", "(ZZ)V", &[
+        JValue::Bool(left as u8),
+        JValue::Bool(right as u8),
+    ]) {
+        Ok(_) => {},
+        Err(e) => error!("Failed to check volume buttons: {:?}", e),
     }
 }

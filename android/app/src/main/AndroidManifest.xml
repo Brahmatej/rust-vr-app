@@ -15,12 +15,15 @@
     <!-- Storage permissions for video access -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
+    <!-- For full file system access on Android 11+ -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
 
 
     <application
         android:label="VR Space"
         android:hasCode="true"
         android:debuggable="true"
+        android:requestLegacyExternalStorage="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
         <activity

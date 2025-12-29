@@ -23,6 +23,8 @@ winit = { version = "0.30", default-features = false, features = ["android-nativ
 raw-window-handle = "0.6"
 # Gamepad input (PS5 controller)
 gilrs = "0.11"
+# Direct evdev access for Android gamepad (gilrs doesn't support Android)
+evdev = "0.12"
 # Math for 3D
 glam = "0.29"
 # Async runtime

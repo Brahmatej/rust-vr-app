@@ -759,47 +759,8 @@ impl Renderer {
             render_pass.draw(0..6, 0..1);
         }
         
-        // 5. Direct Screen UI Overlay (after distortion/scene, overlays on top)
-        if let Some((ctx, ref full_output)) = ui_data {
-            let (width, height) = self.size;
-            let screen_descriptor = egui_wgpu::ScreenDescriptor {
-                size_in_pixels: [width, height],
-                pixels_per_point: ctx.pixels_per_point(),
-            };
-            
-            // Re-tessellate for screen size (different from ui_texture size)
-            let paint_jobs = ctx.tessellate(full_output.shapes.clone(), full_output.pixels_per_point);
-            log::info!("UI Direct Screen Pass: {} paint jobs, screen {}x{}", paint_jobs.len(), width, height);
-            
-            // The textures were already updated in the first pass, just need to update buffers
-            self.egui_renderer.update_buffers(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                &paint_jobs,
-                &screen_descriptor,
-            );
-            
-            {
-                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("UI Direct Screen Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view, // Render directly to swapchain
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load, // Preserve existing content
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                
-                let render_pass_static: &mut wgpu::RenderPass<'static> = unsafe { std::mem::transmute(&mut render_pass) };
-                self.egui_renderer.render(render_pass_static, &paint_jobs, &screen_descriptor);
-            }
-        }
+        // Note: UI is already rendered to ui_texture and composited via shader
+        // No direct screen overlay needed - VR-only UI rendering
         
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
