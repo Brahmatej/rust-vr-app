@@ -70,6 +70,11 @@ pub struct GamepadActions {
     pub nav_down: bool,         // D-pad down
     pub nav_left: bool,         // D-pad left
     pub nav_right: bool,        // D-pad right
+    // Analog sticks (current value, not edge-triggered)
+    pub left_stick_x: f32,
+    pub left_stick_y: f32,
+    pub right_stick_x: f32,
+    pub right_stick_y: f32,
 }
 
 // Global state
@@ -177,6 +182,10 @@ pub fn poll_actions() -> GamepadActions {
         nav_down: current.btn_dpad_down && !prev.btn_dpad_down,
         nav_left: current.btn_dpad_left && !prev.btn_dpad_left,
         nav_right: current.btn_dpad_right && !prev.btn_dpad_right,
+        left_stick_x: current.left_stick_x,
+        left_stick_y: current.left_stick_y,
+        right_stick_x: current.right_stick_x,
+        right_stick_y: current.right_stick_y,
     };
     
     // Update previous state

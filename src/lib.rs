@@ -244,112 +244,62 @@ impl ApplicationHandler for VRApp {
                     // 7. Handle Gamepad Actions (poll once per frame)
                     let gp_actions = gamepad::poll_actions();
                     
-                    // Play/Pause (X button)
-                    if gp_actions.play_pause {
-                        if let Some(decoder) = &self.ndk_decoder {
-                            if decoder.is_paused() {
-                                decoder.resume();
-                                info!("Gamepad: Play");
-                            } else {
-                                decoder.pause();
-                                info!("Gamepad: Pause");
-                            }
-                        }
-                    }
-                    
-                    // Seek (L1/R1)
-                    if gp_actions.seek_back {
-                        if let Some(decoder) = &self.ndk_decoder {
-                            let pos = decoder.get_position();
-                            decoder.seek((pos - 10_000_000).max(0));
-                            info!("Gamepad: Seek -10s");
-                        }
-                    }
-                    if gp_actions.seek_forward {
-                        if let Some(decoder) = &self.ndk_decoder {
-                            let pos = decoder.get_position();
-                            decoder.seek(pos + 10_000_000);
-                            info!("Gamepad: Seek +10s");
-                        }
-                    }
-
-                    // 3D layout: D-pad left/right cycle 2D → Side-by-Side → Over-Under.
-                    if gp_actions.nav_right {
-                        self.stereo_mode = (self.stereo_mode + 1) % 3;
-                        info!("Gamepad: 3D mode -> {}", match self.stereo_mode {
-                            1 => "Side-by-Side", 2 => "Over-Under", _ => "2D" });
-                    }
-                    if gp_actions.nav_left {
-                        self.stereo_mode = (self.stereo_mode + 2) % 3;
-                        info!("Gamepad: 3D mode -> {}", match self.stereo_mode {
-                            1 => "Side-by-Side", 2 => "Over-Under", _ => "2D" });
-                    }
-                    
-                    // Toggle UI (△)
-                    if gp_actions.toggle_ui {
-                        ui.toggle_hamburger();
-                        info!("Gamepad: Toggle UI");
-                    }
-                    
-                    // Reset view/recenter (L3)
+                    // ── Always-active controls ──────────────────────────────
+                    // Recenter (L3)
                     if gp_actions.reset_view {
-                        if let Some(sensors) = &self.sensors {
-                            sensors.recenter();
-                            info!("Gamepad: Recenter View");
-                        }
+                        if let Some(sensors) = &self.sensors { sensors.recenter(); }
                     }
-                    
-                    // Toggle VR mode (R3)
+                    // VR/2D toggle (R3)
                     if gp_actions.toggle_vr_mode {
                         if let Some(renderer) = &mut self.renderer {
                             renderer.vr_mode = !renderer.vr_mode;
-                            info!("Gamepad: VR Mode = {}", renderer.vr_mode);
                         }
                     }
-                    
-                    // File browser controls
+
+                    // ── Menu-gated controls ─────────────────────────────────
                     if ui.file_browser.visible {
-                        // D-pad up/down OR L1/R1 = navigate list
-                        if gp_actions.nav_up || gp_actions.seek_back {
-                            ui.file_browser.move_up();
-                        }
-                        if gp_actions.nav_down || gp_actions.seek_forward {
-                            ui.file_browser.move_down();
-                        }
-                        // X button = select in file browser
-                        if gp_actions.play_pause {
-                            ui.file_browser.select_current();
-                            info!("Gamepad: File Browser Select");
-                        }
-                        // ○ button = go back in file browser
-                        if gp_actions.back {
-                            ui.file_browser.go_back();
-                            info!("Gamepad: File Browser Back");
-                        }
-                        // △ button = close file browser
-                        if gp_actions.toggle_ui {
-                            ui.file_browser.visible = false;
-                            info!("Gamepad: File Browser Close");
-                        }
+                        // Media Center: left-stick coverflow sweep + D-pad; X open; O up; △ close
+                        ui.file_browser.handle_stick(gp_actions.left_stick_x);
+                        if gp_actions.nav_up   || gp_actions.nav_left  { ui.file_browser.move_up(); }
+                        if gp_actions.nav_down || gp_actions.nav_right { ui.file_browser.move_down(); }
+                        if gp_actions.play_pause || gp_actions.confirm { ui.file_browser.select_current(); }
+                        if gp_actions.back      { ui.file_browser.go_back(); }
+                        if gp_actions.toggle_ui { ui.file_browser.visible = false; }
+                    } else if ui.main_menu_visible {
+                        // Dock: D-pad left/right move highlight, X/□ activate, △/○ close
+                        if gp_actions.nav_left  { ui.dock_move_left(); }
+                        if gp_actions.nav_right { ui.dock_move_right(); }
+                        if gp_actions.play_pause || gp_actions.confirm { ui.dock_activate(); }
+                        if gp_actions.toggle_ui || gp_actions.back { ui.main_menu_visible = false; }
                     } else {
-                        // Normal controls when file browser is closed
-                        
-                        // Open file browser (Create button)
+                        // No menu: △ opens dock, Create opens media center, X play/pause,
+                        // L1/R1 seek, D-pad L/R cycle the 3D layout.
+                        if gp_actions.toggle_ui { ui.main_menu_visible = true; }
                         if gp_actions.open_file_picker {
                             ui.file_browser.visible = true;
                             ui.file_browser.refresh_entries();
-                            info!("Gamepad: Open File Browser");
                         }
-                        
-                        // Back/Close menu (○ button)
-                        if gp_actions.back {
-                            if ui.is_hamburger_visible() {
-                                ui.toggle_hamburger();
-                                info!("Gamepad: Close Menu");
+                        if gp_actions.play_pause {
+                            if let Some(decoder) = &self.ndk_decoder {
+                                if decoder.is_paused() { decoder.resume(); } else { decoder.pause(); }
                             }
                         }
+                        if gp_actions.seek_back {
+                            if let Some(d) = &self.ndk_decoder { let p = d.get_position(); d.seek((p - 10_000_000).max(0)); }
+                        }
+                        if gp_actions.seek_forward {
+                            if let Some(d) = &self.ndk_decoder { let p = d.get_position(); d.seek(p + 10_000_000); }
+                        }
+                        if gp_actions.nav_right {
+                            ui.params.stereo_mode = (ui.params.stereo_mode + 1) % 3;
+                            info!("3D -> {}", ui::stereo_label(ui.params.stereo_mode));
+                        }
+                        if gp_actions.nav_left {
+                            ui.params.stereo_mode = (ui.params.stereo_mode + 2) % 3;
+                            info!("3D -> {}", ui::stereo_label(ui.params.stereo_mode));
+                        }
                     }
-                    
+
                     // Zoom controls (L2/R2 - always active)
                     if gp_actions.zoom_in {  // R2
                         ui.params.content_scale = (ui.params.content_scale + 0.02).min(3.0);
@@ -447,7 +397,8 @@ impl ApplicationHandler for VRApp {
                         let _ = frame; // NDK path is preferred
                     }
 
-                    renderer.stereo_mode = self.stereo_mode; // 0 mono / 1 SBS / 2 over-under
+                    renderer.stereo_mode = self.vr_ui.as_ref()
+                        .map(|u| u.params.stereo_mode as u32).unwrap_or(0);
                     renderer.render(orientation, ui_data, distortion_params, content_scale);
                 }
                 
