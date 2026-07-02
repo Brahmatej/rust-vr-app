@@ -138,16 +138,6 @@ pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onWebFrame(
 ) {}
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onThumbnail(
-    _env: jni::JNIEnv,
-    _class: JObject,
-    _path: jni::objects::JString,
-    _width: jni::sys::jint,
-    _height: jni::sys::jint,
-    _rgba: jni::objects::JByteArray,
-) {}
-
-#[no_mangle]
 pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onVoiceResult(
     _env: jni::JNIEnv,
     _class: JObject,

@@ -22,6 +22,7 @@ mod ui;
 mod video;
 mod video_ndk;
 mod gamepad;
+mod thumbs;
 
 /// Main application state
 struct VRApp {
@@ -171,7 +172,24 @@ impl ApplicationHandler for VRApp {
                 if let (Some(state), Some(ui), Some(window)) = (&mut self.egui_state, &mut self.vr_ui, &self.window) {
                     let raw_input = state.take_egui_input(window);
                     state.egui_ctx().begin_frame(raw_input);
-                    
+
+                    // Media Center thumbnails (hardware-accelerated): upload finished
+                    // posters as GPU textures, then request posters for new video tiles.
+                    if ui.file_browser.visible {
+                        let ctx = state.egui_ctx();
+                        for t in thumbs::drain() {
+                            let img = egui::ColorImage::from_rgba_unmultiplied(
+                                [t.w as usize, t.h as usize], &t.rgba);
+                            let tex = ctx.load_texture(
+                                format!("thumb:{}", t.path), img, egui::TextureOptions::LINEAR);
+                            ui.file_browser.set_thumbnail(
+                                std::path::Path::new(&t.path), tex, t.glow);
+                        }
+                        for path in ui.file_browser.pending_thumbnail_requests(12) {
+                            thumbs::request(&self.app, &path.to_string_lossy(), 320, 180);
+                        }
+                    }
+
                     ui.render(state.egui_ctx(), self.renderer.as_ref().map(|r| r.vr_mode).unwrap_or(false));
                     
                     let output = state.egui_ctx().end_frame();
