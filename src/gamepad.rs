@@ -68,6 +68,8 @@ pub struct GamepadActions {
     // Navigation
     pub nav_up: bool,           // D-pad up
     pub nav_down: bool,         // D-pad down
+    pub nav_left: bool,         // D-pad left
+    pub nav_right: bool,        // D-pad right
 }
 
 // Global state
@@ -173,6 +175,8 @@ pub fn poll_actions() -> GamepadActions {
         // Navigation
         nav_up: current.btn_dpad_up && !prev.btn_dpad_up,
         nav_down: current.btn_dpad_down && !prev.btn_dpad_down,
+        nav_left: current.btn_dpad_left && !prev.btn_dpad_left,
+        nav_right: current.btn_dpad_right && !prev.btn_dpad_right,
     };
     
     // Update previous state
@@ -254,6 +258,15 @@ pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onDpadAxis(
 ) {
     if let Ok(mut hat) = HAT_STATE.lock() {
         *hat = (hat_x, hat_y);
+    }
+    // The D-pad arrives as a HAT axis (not key events), so translate it into the
+    // d-pad button booleans — otherwise the nav_up/down/left/right actions (which
+    // edge-detect on those booleans) never fire for the D-pad.
+    if let Ok(mut state) = GAMEPAD_STATE.lock() {
+        state.btn_dpad_left  = hat_x < -0.5;
+        state.btn_dpad_right = hat_x >  0.5;
+        state.btn_dpad_up    = hat_y < -0.5;
+        state.btn_dpad_down  = hat_y >  0.5;
     }
     info!("JNI: D-pad HAT x={} y={}", hat_x, hat_y);
 }

@@ -43,6 +43,8 @@ struct VRApp {
     ndk_decoder: Option<video_ndk::NdkVideoDecoder>,
     // Evdev Gamepad Reader
     gamepad_reader: Option<gamepad::GamepadReader>,
+    // Stereoscopic 3D layout for video: 0 = mono/2D, 1 = side-by-side, 2 = over-under.
+    stereo_mode: u32,
 }
 
 impl VRApp {
@@ -60,6 +62,7 @@ impl VRApp {
             initial_content_scale: 1.0,
             ndk_decoder: None,
             gamepad_reader: Some(gamepad::GamepadReader::new()),
+            stereo_mode: 0,
         }
     }
 }
@@ -269,6 +272,18 @@ impl ApplicationHandler for VRApp {
                             info!("Gamepad: Seek +10s");
                         }
                     }
+
+                    // 3D layout: D-pad left/right cycle 2D → Side-by-Side → Over-Under.
+                    if gp_actions.nav_right {
+                        self.stereo_mode = (self.stereo_mode + 1) % 3;
+                        info!("Gamepad: 3D mode -> {}", match self.stereo_mode {
+                            1 => "Side-by-Side", 2 => "Over-Under", _ => "2D" });
+                    }
+                    if gp_actions.nav_left {
+                        self.stereo_mode = (self.stereo_mode + 2) % 3;
+                        info!("Gamepad: 3D mode -> {}", match self.stereo_mode {
+                            1 => "Side-by-Side", 2 => "Over-Under", _ => "2D" });
+                    }
                     
                     // Toggle UI (△)
                     if gp_actions.toggle_ui {
@@ -431,7 +446,8 @@ impl ApplicationHandler for VRApp {
                         // Fallback path for Java-based video (not used with NDK decoder)
                         let _ = frame; // NDK path is preferred
                     }
-                        
+
+                    renderer.stereo_mode = self.stereo_mode; // 0 mono / 1 SBS / 2 over-under
                     renderer.render(orientation, ui_data, distortion_params, content_scale);
                 }
                 

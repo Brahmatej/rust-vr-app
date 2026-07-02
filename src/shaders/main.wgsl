@@ -5,6 +5,7 @@ struct CameraUniforms {
     view_proj: mat4x4<f32>,
     eye_offset: vec4<f32>,  // x = offset, y = has_video, z = time, w = content_scale
     video_info: vec4<f32>,  // x = aspect_ratio (w/h), y = width, z = height, w = unused
+    stereo: vec4<f32>,      // x = mode (0 mono,1 SBS,2 over-under), y = eye_index
 };
 
 @group(0) @binding(0)
@@ -32,8 +33,14 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     // Dynamic screen quad based on video aspect ratio
     // Base screen: 2.0m height at Z = -2.0
     let base_height = 1.8;
-    let aspect = camera.video_info.x;
-    
+    // Stereo frames pack two eyes in one texture, so a single eye is half as wide
+    // (SBS) or half as tall (over-under). Correct the aspect so the per-eye image
+    // isn't stretched.
+    let smode = camera.stereo.x;
+    var aspect = camera.video_info.x;
+    if (smode > 0.5 && smode < 1.5) { aspect = aspect * 0.5; }       // SBS
+    else if (smode > 1.5) { aspect = aspect * 2.0; }                 // over-under
+
     // Calculate width based on aspect ratio
     // aspect = width/height, so width = height * aspect
     var half_w = base_height * 0.5 * aspect;
@@ -95,9 +102,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let has_video = camera.eye_offset.y > 0.5;
     
     if (has_video) {
+        // Stereo remap: each eye samples its half of the frame. eye_index 0/2 → first
+        // half (left/top), 1 → second half (right/bottom).
+        let smode = camera.stereo.x;
+        let is_right = camera.stereo.y > 0.5 && camera.stereo.y < 1.5;
+        var suv = uv;
+        if (smode > 0.5 && smode < 1.5) {          // side-by-side
+            suv.x = uv.x * 0.5 + select(0.0, 0.5, is_right);
+        } else if (smode > 1.5) {                  // over-under
+            suv.y = uv.y * 0.5 + select(0.0, 0.5, is_right);
+        }
         // YUV to RGB Conversion (BT.601 Limited Range)
-        let y_raw = textureSample(texture_y, video_sampler, uv).r;
-        let uv_val = textureSample(texture_uv, video_sampler, uv).rg;
+        let y_raw = textureSample(texture_y, video_sampler, suv).r;
+        let uv_val = textureSample(texture_uv, video_sampler, suv).rg;
         
         // Adjust for Limited Range (16-235 for Y, 16-240 for UV)
         // 1.164 = 255 / (235-16)

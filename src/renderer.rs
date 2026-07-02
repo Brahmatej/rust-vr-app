@@ -22,7 +22,15 @@ struct CameraUniforms {
     view_proj: [[f32; 4]; 4],
     eye_offset: [f32; 4], // x = eye offset, y = has_video, z = time, w = content_scale
     video_info: [f32; 4], // x = aspect_ratio, y = width, z = height, w = unused
+    stereo: [f32; 4],     // x = mode (0 mono,1 SBS,2 over-under), y = eye_index, zw unused
 }
+
+// Each eye gets its OWN region in the camera uniform buffer, addressed by a dynamic
+// offset, so the two eye passes in one submit don't clobber each other's uniforms
+// (that bug made both eyes read the last write → identical images, no depth, and in
+// SBS both eyes showed the same half). 256 satisfies every GPU's
+// min_uniform_buffer_offset_alignment and holds CameraUniforms (128 B) comfortably.
+const EYE_STRIDE: u64 = 256;
 
 // Distortion uniforms
 #[repr(C)]
@@ -61,7 +69,9 @@ pub struct Renderer {
     has_video: bool,
     video_width: u32,
     video_height: u32,
-    
+    // Stereoscopic video layout: 0 = mono, 1 = side-by-side, 2 = over-under.
+    pub stereo_mode: u32,
+
     // UI Texture (for Shader Overlay)
     ui_texture: wgpu::Texture,
     ui_texture_view: wgpu::TextureView,
@@ -138,13 +148,14 @@ impl Renderer {
         };
         surface.configure(&device, &config);
         
+        // Room for 3 eye uniform regions (left / right / mono), EYE_STRIDE apart.
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera Buffer"),
-            size: std::mem::size_of::<CameraUniforms>() as u64,
+            size: EYE_STRIDE * 3,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        
+
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Camera Bind Group Layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -152,19 +163,25 @@ impl Renderer {
                 visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<CameraUniforms>() as u64),
                 },
                 count: None,
             }],
         });
-        
+
+        // Bind a single CameraUniforms-sized window; the dynamic offset selects the eye.
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Camera Bind Group"),
             layout: &bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: camera_buffer.as_entire_binding(),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &camera_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(std::mem::size_of::<CameraUniforms>() as u64),
+                }),
             }],
         });
         
@@ -450,7 +467,8 @@ impl Renderer {
             has_video: false,
             video_width: 1920,  // Default 16:9
             video_height: 1080,
-            
+            stereo_mode: 0,
+
             vr_mode: false,
             egui_renderer,
             offscreen_texture,
@@ -824,8 +842,12 @@ impl Renderer {
             eye_offset: [dynamic_offset, if self.has_video { 1.0 } else { 0.0 }, self.start_time.elapsed().as_secs_f32(), content_scale],
             // Video aspect ratio (width/height)
             video_info: [self.video_width as f32 / self.video_height as f32, self.video_width as f32, self.video_height as f32, 0.0],
+            // Stereo: mode + which eye (0 left, 1 right, 2 mono) — drives per-eye UV split.
+            stereo: [self.stereo_mode as f32, eye_index as f32, 0.0, 0.0],
         };
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniforms));
+        // Write into THIS eye's region so the other eye's pass keeps its own uniforms.
+        let eye_off = eye_index as u64 * EYE_STRIDE;
+        self.queue.write_buffer(&self.camera_buffer, eye_off, bytemuck::bytes_of(&camera_uniforms));
         
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -844,10 +866,10 @@ impl Renderer {
             });
             render_pass.set_viewport(viewport_x as f32, 0.0, viewport_width as f32, height as f32, 0.0, 1.0);
             render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.camera_bind_group, &[eye_off as u32]);
             // Always bind video texture (placeholder or real)
             render_pass.set_bind_group(1, &self.video_bind_group, &[]);
-            
+
             render_pass.draw(0..6, 0..1);
         }
     }
