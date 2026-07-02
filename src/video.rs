@@ -115,6 +115,52 @@ pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onVideoFdReady(
     PENDING_VIDEO_FD.store(fd, Ordering::SeqCst);
 }
 
+// ── Recovery baseline stubs ─────────────────────────────────────────────────────
+// The decompiled (stable-build) Java declares these native methods; the reconstructed
+// baseline Rust engine doesn't implement their features yet. Stubbed as no-ops so the
+// JNI links resolve and the app doesn't UnsatisfiedLinkError-crash. Real
+// implementations get restored as the corresponding features are rebuilt.
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onDisplayRotation(
+    _env: jni::JNIEnv,
+    _class: JObject,
+    _rotation: jni::sys::jint,
+) {}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onWebFrame(
+    _env: jni::JNIEnv,
+    _class: JObject,
+    _width: jni::sys::jint,
+    _height: jni::sys::jint,
+    _pixels: jni::objects::JByteArray,
+) {}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onThumbnail(
+    _env: jni::JNIEnv,
+    _class: JObject,
+    _path: jni::objects::JString,
+    _width: jni::sys::jint,
+    _height: jni::sys::jint,
+    _rgba: jni::objects::JByteArray,
+) {}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onVoiceResult(
+    _env: jni::JNIEnv,
+    _class: JObject,
+    _text: jni::objects::JString,
+) {}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onVoiceError(
+    _env: jni::JNIEnv,
+    _class: JObject,
+    _code: jni::sys::jint,
+) {}
+
 /// Start audio from file path (for file browser selections)
 pub fn start_audio_from_path(app: &AndroidApp, path: &str) {
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM).unwrap() };

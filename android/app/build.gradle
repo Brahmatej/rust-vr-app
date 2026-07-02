@@ -1,0 +1,45 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.vrapp.core'
+    compileSdk 36
+    ndkVersion "27.0.12077973"
+
+    defaultConfig {
+        // Distinct from the installed com.vrapp.core so this recovery build installs
+        // SIDE BY SIDE without touching the existing reference copy on the device.
+        applicationId "com.vrapp.core.dev"
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName "1.0-recovery"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+        debug {
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation "org.mozilla.geckoview:geckoview:152.0.20260617213557"
+    implementation "androidx.core:core:1.18.0"
+}
