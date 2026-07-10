@@ -79,13 +79,14 @@ pub struct Renderer {
     web_width: u32,
     web_height: u32,
 
-    // UI Texture (for Shader Overlay)
+    // UI Texture (egui renders here; shown as its OWN curved panel, not composited)
     ui_texture: wgpu::Texture,
     ui_texture_view: wgpu::TextureView,
-    
-    // UI Texture (for Shader Overlay)
+    // Separate curved UI panel (dock / Media Center), drawn front-and-centre.
+    ui_panel_pipeline: RenderPipeline,
+    ui_panel_bind_group: BindGroup,
 
-    
+
     // Post Processing (Distortion)
     offscreen_texture: wgpu::Texture,
     offscreen_view: wgpu::TextureView,
@@ -108,7 +109,13 @@ pub struct Renderer {
 impl Renderer {
     // Inter-pupillary distance (average human IPD is ~63mm)
     const IPD: f32 = 0.063;
-    
+    // Dome screen mesh (must match SCREEN_COLS/ROWS in main.wgsl) and UI panel mesh
+    // (must match COLS/ROWS in ui_panel.wgsl).
+    const SCREEN_COLS: u32 = 64;
+    const SCREEN_ROWS: u32 = 36;
+    const PANEL_COLS: u32 = 32;
+    const PANEL_ROWS: u32 = 32;
+
     pub async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
         
@@ -315,6 +322,86 @@ impl Renderer {
         });
         let ui_texture_view = ui_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // ── Separate curved UI panel pipeline (dock / Media Center) ──────────────
+        let ui_panel_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("UI Panel Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ui_panel.wgsl").into()),
+        });
+        let ui_panel_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("UI Panel Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let ui_panel_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("UI Panel BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let ui_panel_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("UI Panel Bind Group"),
+            layout: &ui_panel_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&ui_texture_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&ui_panel_sampler) },
+            ],
+        });
+        let ui_panel_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("UI Panel Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout, &ui_panel_bgl],
+            push_constant_ranges: &[],
+        });
+        let ui_panel_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("UI Panel Pipeline"),
+            layout: Some(&ui_panel_layout),
+            vertex: wgpu::VertexState {
+                module: &ui_panel_shader, entry_point: Some("vs_main"),
+                buffers: &[], compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ui_panel_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    // egui premultiplied alpha.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         // Create placeholder 1x1 video textures (required for bind group)
         let placeholder_texture_y = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Placeholder Video Texture Y"),
@@ -520,6 +607,8 @@ impl Renderer {
             start_time: std::time::Instant::now(),
             ui_texture,
             ui_texture_view,
+            ui_panel_pipeline,
+            ui_panel_bind_group,
         }
     }
     
@@ -986,12 +1075,19 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             render_pass.set_viewport(viewport_x as f32, 0.0, viewport_width as f32, height as f32, 0.0, 1.0);
+
+            // 1) Curved dome screen (video / web / test pattern).
             render_pass.set_pipeline(&self.pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[eye_off as u32]);
-            // Always bind video texture (placeholder or real)
             render_pass.set_bind_group(1, &self.video_bind_group, &[]);
+            render_pass.draw(0..Self::SCREEN_COLS * Self::SCREEN_ROWS * 6, 0..1);
 
-            render_pass.draw(0..6, 0..1);
+            // 2) Floating curved UI panel (dock / Media Center) — same dome curvature,
+            //    closer + centred, alpha-blended over the screen.
+            render_pass.set_pipeline(&self.ui_panel_pipeline);
+            render_pass.set_bind_group(0, &self.camera_bind_group, &[eye_off as u32]);
+            render_pass.set_bind_group(1, &self.ui_panel_bind_group, &[]);
+            render_pass.draw(0..Self::PANEL_COLS * Self::PANEL_ROWS * 6, 0..1);
         }
     }
 }
