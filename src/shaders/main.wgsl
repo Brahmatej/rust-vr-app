@@ -20,6 +20,8 @@ var texture_uv: texture_2d<f32>;
 var video_sampler: sampler;
 @group(1) @binding(3)
 var ui_texture: texture_2d<f32>;
+@group(1) @binding(4)
+var web_texture: texture_2d<f32>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -100,18 +102,32 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let uv = input.uv;
     let has_video = camera.eye_offset.y > 0.5;
-    
+    let is_web = camera.video_info.w > 0.5;
+
+    // Stereo remap: each eye samples its half of the frame. eye_index 0/2 → first
+    // half (left/top), 1 → second half (right/bottom). Shared by web + video.
+    let smode = camera.stereo.x;
+    let is_right = camera.stereo.y > 0.5 && camera.stereo.y < 1.5;
+    var suv = uv;
+    if (smode > 0.5 && smode < 1.5) {          // side-by-side
+        suv.x = uv.x * 0.5 + select(0.0, 0.5, is_right);
+    } else if (smode > 1.5) {                  // over-under
+        suv.y = uv.y * 0.5 + select(0.0, 0.5, is_right);
+    }
+
+    if (is_web) {
+        // Browser page (already RGB); sRGB texture is auto-linearized on sample, so
+        // re-encode to match the video path's gamma handling.
+        var rgb = textureSample(web_texture, video_sampler, suv).rgb;
+        rgb = pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+        // Mix UI overlay on top (full-frame uv, not split).
+        let ui_color = textureSample(ui_texture, video_sampler, uv);
+        rgb = mix(rgb, ui_color.rgb, ui_color.a);
+        rgb = pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(2.2));
+        return vec4<f32>(rgb, 1.0);
+    }
+
     if (has_video) {
-        // Stereo remap: each eye samples its half of the frame. eye_index 0/2 → first
-        // half (left/top), 1 → second half (right/bottom).
-        let smode = camera.stereo.x;
-        let is_right = camera.stereo.y > 0.5 && camera.stereo.y < 1.5;
-        var suv = uv;
-        if (smode > 0.5 && smode < 1.5) {          // side-by-side
-            suv.x = uv.x * 0.5 + select(0.0, 0.5, is_right);
-        } else if (smode > 1.5) {                  // over-under
-            suv.y = uv.y * 0.5 + select(0.0, 0.5, is_right);
-        }
         // YUV to RGB Conversion (BT.601 Limited Range)
         let y_raw = textureSample(texture_y, video_sampler, suv).r;
         let uv_val = textureSample(texture_uv, video_sampler, suv).rg;

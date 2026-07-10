@@ -72,6 +72,13 @@ pub struct Renderer {
     // Stereoscopic video layout: 0 = mono, 1 = side-by-side, 2 = over-under.
     pub stereo_mode: u32,
 
+    // Web (browser) RGBA texture — shown on the VR screen when in web mode.
+    web_texture: wgpu::Texture,
+    web_texture_view: wgpu::TextureView,
+    pub has_web: bool,
+    web_width: u32,
+    web_height: u32,
+
     // UI Texture (for Shader Overlay)
     ui_texture: wgpu::Texture,
     ui_texture_view: wgpu::TextureView,
@@ -247,6 +254,17 @@ impl Renderer {
                     },
                     count: None,
                 },
+                // Web (browser) Texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -322,6 +340,19 @@ impl Renderer {
         });
         let placeholder_view_uv = placeholder_texture_uv.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Web (browser) RGBA texture — starts as a 1x1 placeholder.
+        let web_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Web Texture"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let web_texture_view = web_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         let video_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Video Bind Group (Placeholder)"),
             layout: &video_bind_group_layout,
@@ -330,6 +361,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&placeholder_view_uv) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&video_sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&ui_texture_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&web_texture_view) },
             ],
         });
 
@@ -469,6 +501,12 @@ impl Renderer {
             video_height: 1080,
             stereo_mode: 0,
 
+            web_texture_view: web_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            web_texture,
+            has_web: false,
+            web_width: 1920,
+            web_height: 1080,
+
             vr_mode: false,
             egui_renderer,
             offscreen_texture,
@@ -560,9 +598,10 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view_uv) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.video_sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.ui_texture_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.web_texture_view) },
             ],
         });
-        
+
         self.video_texture_y = Some(texture_y);
         self.video_texture_y_view = Some(view_y);
         self.video_texture_uv = Some(texture_uv);
@@ -615,7 +654,83 @@ impl Renderer {
             );
         }
     }
-    
+
+    /// Updates the web (browser) RGBA texture with a new frame from GeckoView.
+    /// Recreates the texture (and rebuilds the shared video bind group so binding 4
+    /// points at it) when the size changes, then uploads the pixels.
+    pub fn update_web_texture(&mut self, rgba: &[u8], width: u32, height: u32) {
+        if width == 0 || height == 0 { return; }
+
+        if self.web_width != width || self.web_height != height || !self.has_web {
+            let web_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Web Texture"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let web_texture_view = web_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Rebuild the video bind group so binding 4 points at the new web texture.
+            // Reuse the current video textures (or the 1x1 placeholders on first use).
+            let placeholder_y = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Placeholder Y"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
+            });
+            let placeholder_y_view = placeholder_y.create_view(&wgpu::TextureViewDescriptor::default());
+            let placeholder_uv = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Placeholder UV"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rg8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
+            });
+            let placeholder_uv_view = placeholder_uv.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let y_view = self.video_texture_y_view.as_ref().unwrap_or(&placeholder_y_view);
+            let uv_view = self.video_texture_uv_view.as_ref().unwrap_or(&placeholder_uv_view);
+
+            self.video_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Video Bind Group (web-updated)"),
+                layout: &self.video_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(y_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(uv_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.video_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.ui_texture_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&web_texture_view) },
+                ],
+            });
+
+            self.web_texture = web_texture;
+            self.web_texture_view = web_texture_view;
+            self.web_width = width;
+            self.web_height = height;
+            self.has_web = true;
+        }
+
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.web_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+    }
+
+
     pub fn render(
         &mut self, 
         head_orientation: Quat, 
@@ -836,12 +951,18 @@ impl Renderer {
         let view_matrix = Mat4::from_quat(head_orientation.inverse());
         let view_proj = proj_matrix * view_matrix;
         
+        // In web mode the browser texture takes over the screen; use its aspect.
+        let (scr_w, scr_h) = if self.has_web {
+            (self.web_width as f32, self.web_height as f32)
+        } else {
+            (self.video_width as f32, self.video_height as f32)
+        };
         let camera_uniforms = CameraUniforms {
             view_proj: view_proj.to_cols_array_2d(),
             // Pass has_video in .y, Time in .z, Content Scale in .w
             eye_offset: [dynamic_offset, if self.has_video { 1.0 } else { 0.0 }, self.start_time.elapsed().as_secs_f32(), content_scale],
-            // Video aspect ratio (width/height)
-            video_info: [self.video_width as f32 / self.video_height as f32, self.video_width as f32, self.video_height as f32, 0.0],
+            // x = aspect, y = width, z = height, w = web flag (1 = show web texture)
+            video_info: [scr_w / scr_h, scr_w, scr_h, if self.has_web { 1.0 } else { 0.0 }],
             // Stereo: mode + which eye (0 left, 1 right, 2 mono) — drives per-eye UV split.
             stereo: [self.stereo_mode as f32, eye_index as f32, 0.0, 0.0],
         };

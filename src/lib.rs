@@ -23,6 +23,7 @@ mod video;
 mod video_ndk;
 mod gamepad;
 mod thumbs;
+mod webview;
 
 /// Main application state
 struct VRApp {
@@ -226,6 +227,23 @@ impl ApplicationHandler for VRApp {
                         }
                         ui.params.vr_exit_requested = false; // Reset flag
                     }
+
+                    // 5b. Browser: engine activation, URL load, and toolbar nav flags.
+                    if let Some(engine) = ui.params.pending_engine.take() {
+                        webview::set_engine(&self.app, engine);
+                    }
+                    if let Some(url) = ui.web_browser.pending_url.take() {
+                        webview::load_url(&self.app, &url);
+                        ui.web_browser.current_url = url;
+                    }
+                    if ui.web_browser.go_back    { webview::go_back(&self.app);    ui.web_browser.go_back = false; }
+                    if ui.web_browser.go_forward { webview::go_forward(&self.app); ui.web_browser.go_forward = false; }
+                    if ui.web_browser.reload     { webview::reload(&self.app);     ui.web_browser.reload = false; }
+                    if ui.web_browser.new_tab    { webview::new_tab(&self.app);    ui.web_browser.new_tab = false; }
+                    if ui.web_browser.close_tab  { webview::close_tab(&self.app);  ui.web_browser.close_tab = false; }
+                    if let Some((w, h)) = ui.web_browser.pending_resize.take() {
+                        webview::resize(&self.app, w, h);
+                    }
                     
                     // 6. Handle Playback Controls (from UI buttons)
                     if ui.params.toggle_play_pause {
@@ -413,6 +431,16 @@ impl ApplicationHandler for VRApp {
                     } else if let Some(frame) = video::VideoManager::get_video_frame(&self.app) {
                         // Fallback path for Java-based video (not used with NDK decoder)
                         let _ = frame; // NDK path is preferred
+                    }
+
+                    // Browser: when in web mode, show the live page on the screen.
+                    let web_mode = self.vr_ui.as_ref().map(|u| u.params.web_mode).unwrap_or(false);
+                    if web_mode {
+                        if let Some((w, h, rgba)) = webview::get_frame() {
+                            renderer.update_web_texture(&rgba, w, h);
+                        }
+                    } else {
+                        renderer.has_web = false;
                     }
 
                     renderer.stereo_mode = self.vr_ui.as_ref()
