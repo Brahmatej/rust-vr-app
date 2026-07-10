@@ -336,11 +336,23 @@ impl ApplicationHandler for VRApp {
                         }
                     }
 
-                    // Zoom controls (L2/R2 - always active)
-                    if gp_actions.zoom_in {  // R2
+                    // Zoom controls (L2/R2 - always active). DualSense over Bluetooth
+                    // reports triggers as ANALOG AXES, not digital key presses, so this
+                    // reads r2_trigger/l2_trigger (0.0-1.0) with a small deadzone, scaled
+                    // by how far the trigger is pressed - not the (rarely-firing) digital
+                    // btn_l2/btn_r2 booleans.
+                    const TRIGGER_DEADZONE: f32 = 0.08;
+                    const ZOOM_SPEED: f32 = 0.05;
+                    if gp_actions.r2_trigger > TRIGGER_DEADZONE {
+                        ui.params.content_scale =
+                            (ui.params.content_scale + ZOOM_SPEED * gp_actions.r2_trigger).min(3.0);
+                    } else if gp_actions.zoom_in {
                         ui.params.content_scale = (ui.params.content_scale + 0.02).min(3.0);
                     }
-                    if gp_actions.zoom_out {  // L2
+                    if gp_actions.l2_trigger > TRIGGER_DEADZONE {
+                        ui.params.content_scale =
+                            (ui.params.content_scale - ZOOM_SPEED * gp_actions.l2_trigger).max(0.5);
+                    } else if gp_actions.zoom_out {
                         ui.params.content_scale = (ui.params.content_scale - 0.02).max(0.5);
                     }
                     

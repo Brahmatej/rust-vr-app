@@ -64,6 +64,10 @@ pub struct GamepadActions {
     // Zoom (analog triggers - for now digital)
     pub zoom_in: bool,          // R2
     pub zoom_out: bool,         // L2
+    // Analog trigger values (Bluetooth DualSense reports these as axes, not
+    // digital key events, so zoom must read these, not btn_l2/btn_r2).
+    pub l2_trigger: f32,
+    pub r2_trigger: f32,
     
     // Navigation
     pub nav_up: bool,           // D-pad up
@@ -176,6 +180,8 @@ pub fn poll_actions() -> GamepadActions {
         // Zoom (continuous while held)
         zoom_in: current.btn_r2,
         zoom_out: current.btn_l2,
+        l2_trigger: current.l2_trigger,
+        r2_trigger: current.r2_trigger,
         
         // Navigation
         nav_up: current.btn_dpad_up && !prev.btn_dpad_up,
