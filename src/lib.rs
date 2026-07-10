@@ -171,7 +171,21 @@ impl ApplicationHandler for VRApp {
                 let mut ctx_clone = None;
                 
                 if let (Some(state), Some(ui), Some(window)) = (&mut self.egui_state, &mut self.vr_ui, &self.window) {
-                    let raw_input = state.take_egui_input(window);
+                    let mut raw_input = state.take_egui_input(window);
+                    // The UI is rasterized into a FIXED 2048x2048 SQUARE texture that gets
+                    // curved onto the centered VR panel (renderer.rs render_eye + ScreenDescriptor
+                    // { size_in_pixels: [2048, 2048] }, ui_panel.wgsl). egui_winit otherwise
+                    // derives screen_rect from the real (non-square, e.g. wide) device window,
+                    // so the dock/Media Center get laid out/centered against the WIDE window
+                    // rect but rasterized onto a SQUARE canvas - content anchored toward the
+                    // real window's right/top edge lands outside or in a corner of the square.
+                    // Lock layout to the same square space that gets rasterized so panels are
+                    // actually centered where they're drawn.
+                    state.egui_ctx().set_pixels_per_point(1.0);
+                    raw_input.screen_rect = Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(2048.0, 2048.0),
+                    ));
                     state.egui_ctx().begin_frame(raw_input);
 
                     // Media Center thumbnails (hardware-accelerated): upload finished

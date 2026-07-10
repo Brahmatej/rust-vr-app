@@ -1040,7 +1040,7 @@ public class MainActivity extends NativeActivity {
         if ((source & 1025) == 1025 || (source & InputDeviceCompat.SOURCE_JOYSTICK) == 16777232) {
             int keyCode = keyEvent.getKeyCode();
             boolean z = keyEvent.getAction() == 0;
-            Log.i(TAG, "GAMEPAD KEY: code=" + keyCode + " pressed=" + z);
+            Log.i(TAG, "GAMEPAD KEY: code=" + keyCode + " scan=" + keyEvent.getScanCode() + " pressed=" + z);
             if (z) {
                 if (keyCode == 21) {
                     volumeDown();

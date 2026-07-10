@@ -193,11 +193,13 @@ impl SensorInput {
                                 // info!("DATA: {:.3} {:.3} {:.3} {:.3}", x, y, z, w);
                             }
                             
-                            // Use (-y, x) mapping to fix cross-talk
-                            // Previous attempts: (x,y) -> cross-talk. (y,-x) -> cross-talk.
-                            // Trying (-y, x) which is the other 90-degree rotation.
-                            
-                            new_quat = Quat::from_xyzw(-y, x, z, w).normalize();
+                            // Cross-talk-free axis mapping is (-y, x, z, w), but that made
+                            // every direction rotate opposite of head movement. Negating
+                            // the vector part (x,y,z) of a unit quaternion is its inverse
+                            // (conjugate) - it reverses the rotation direction on ALL axes
+                            // uniformly without reintroducing the cross-talk the (-y,x)
+                            // swap was fixing.
+                            new_quat = Quat::from_xyzw(y, -x, -z, w).normalize();
                             updated = true;
                         
                         } else if sensor_type == ASENSOR_TYPE_GYROSCOPE {
@@ -209,14 +211,11 @@ impl SensorInput {
                             if last_ts > 0 {
                                 let dt = (ts - last_ts) as f32 / 1_000_000_000.0;
                                 if dt < 0.2 {
-                                    // Match (-y, x) mapping
-                                    // Pitch (X) -> -SensY (-gy)
-                                    // Yaw (Y)   -> SensX (gx)
-                                    // Roll (Z)  -> SensZ (gz)
-                                    
-                                    gyro_pitch -= gy * dt;
-                                    gyro_yaw += gx * dt;
-                                    gyro_roll += gz * dt;
+                                    // Inverted to match the (y, -x, -z, w) rotation-vector
+                                    // mapping above (full direction flip, same as that fix).
+                                    gyro_pitch += gy * dt;
+                                    gyro_yaw -= gx * dt;
+                                    gyro_roll -= gz * dt;
                                     
                                     new_quat = Quat::from_euler(
                                         glam::EulerRot::YXZ,
