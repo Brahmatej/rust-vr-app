@@ -320,11 +320,13 @@ impl ApplicationHandler for VRApp {
                         if gp_actions.nav_left  { ui.dock_move_left(); }
                         if gp_actions.nav_right { ui.dock_move_right(); }
                         if gp_actions.play_pause || gp_actions.confirm { ui.dock_activate(); }
-                        if gp_actions.toggle_ui || gp_actions.back { ui.main_menu_visible = false; }
+                        if gp_actions.toggle_ui || gp_actions.back || gp_actions.open_settings {
+                            ui.main_menu_visible = false;
+                        }
                     } else {
-                        // No menu: △ opens dock, Create opens media center, X play/pause,
+                        // No menu: △/Options open dock, Create opens media center, X play/pause,
                         // L1/R1 seek, D-pad L/R cycle the 3D layout.
-                        if gp_actions.toggle_ui { ui.main_menu_visible = true; }
+                        if gp_actions.toggle_ui || gp_actions.open_settings { ui.main_menu_visible = true; }
                         if gp_actions.open_file_picker {
                             ui.file_browser.visible = true;
                             ui.file_browser.refresh_entries();

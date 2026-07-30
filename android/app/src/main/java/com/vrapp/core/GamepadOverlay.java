@@ -29,8 +29,7 @@ public class GamepadOverlay extends View {
 
     @Override // android.view.View, android.view.KeyEvent.Callback
     public boolean onKeyDown(int i, KeyEvent keyEvent) {
-        Log.i(TAG, "RAW KEY DOWN (any source): code=" + i + " scan=" + keyEvent.getScanCode()
-                + " source=0x" + Integer.toHexString(keyEvent.getSource()) + " device=" + keyEvent.getDeviceId());
+        Log.d(TAG, "KEY DOWN code=" + i + " source=0x" + Integer.toHexString(keyEvent.getSource()));
         if (isFromGamepad(keyEvent.getSource())) {
             this.activity.onGamepadButton(i, true);
             return true;
@@ -40,8 +39,7 @@ public class GamepadOverlay extends View {
 
     @Override // android.view.View, android.view.KeyEvent.Callback
     public boolean onKeyUp(int i, KeyEvent keyEvent) {
-        Log.i(TAG, "RAW KEY UP (any source): code=" + i + " scan=" + keyEvent.getScanCode()
-                + " source=0x" + Integer.toHexString(keyEvent.getSource()) + " device=" + keyEvent.getDeviceId());
+        Log.d(TAG, "KEY UP code=" + i + " source=0x" + Integer.toHexString(keyEvent.getSource()));
         if (isFromGamepad(keyEvent.getSource())) {
             this.activity.onGamepadButton(i, false);
             return true;

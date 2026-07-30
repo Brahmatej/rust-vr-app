@@ -116,16 +116,18 @@ pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onVideoFdReady(
 }
 
 // ── Recovery baseline stub ──────────────────────────────────────────────────────
-// The decompiled Java declares onDisplayRotation as native; the head-tracking-flip
-// feature (orientation.rs) isn't rebuilt yet, so this is a no-op for now to keep the
-// JNI link resolved. (onWebFrame/onVoiceResult/onVoiceError are provided by webview.rs.)
-
+// Surface::ROTATION_0/90/180/270 as reported by MainActivity.reportDisplayRotation().
+// Head tracking needs this: the sensor quaternion is expressed against the device's
+// PORTRAIT-referenced frame, so in landscape the screen is rotated relative to it and
+// the tracking axes must be rotated back by the same amount (see sensors.rs).
 #[no_mangle]
 pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onDisplayRotation(
     _env: jni::JNIEnv,
     _class: JObject,
-    _rotation: jni::sys::jint,
-) {}
+    rotation: jni::sys::jint,
+) {
+    crate::sensors::set_display_rotation(rotation as i32);
+}
 
 /// Start audio from file path (for file browser selections)
 pub fn start_audio_from_path(app: &AndroidApp, path: &str) {

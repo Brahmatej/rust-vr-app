@@ -18,6 +18,49 @@ const ASENSOR_TYPE_GYROSCOPE: i32 = 4;
 // Static storage for reference orientation (survives activity recreation)
 static SAVED_REFERENCE: OnceLock<Mutex<Quat>> = OnceLock::new();
 
+/// Current Surface.ROTATION_* of the display, pushed in from Java via
+/// MainActivity.onDisplayRotation -> video.rs. Defaults to ROTATION_90 (the
+/// usual landscape the headset sits in) until the first report arrives.
+static DISPLAY_ROTATION: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
+
+pub fn set_display_rotation(rotation: i32) {
+    info!("Sensors: display rotation = {}", rotation);
+    DISPLAY_ROTATION.store(rotation, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Convert an Android rotation-vector quaternion into our render space.
+///
+/// Android reports device->world in **ENU**: world X=east, Y=north, Z=UP, and the
+/// device frame is referenced to PORTRAIT (X=right, Y=up the screen, Z=out of it).
+/// Our renderer is OpenGL-style: Y=up, -Z=forward, and it builds the view matrix as
+/// `Mat4::from_quat(orientation.inverse())`, so `orientation` must be a genuine
+/// camera->world rotation in that space.
+///
+/// Blind per-axis sign flips can't express this: it's a change of basis on BOTH
+/// sides. The world side needs ENU(Z-up) -> GL(Y-up), i.e. a -90 deg rotation about
+/// X. The device side needs the screen rotation undone, i.e. a rotation about the
+/// device's Z by the current display rotation. Composing those is what makes every
+/// axis (yaw/pitch/roll) come out in the right direction simultaneously.
+fn sensor_quat_to_render(x: f32, y: f32, z: f32, w: f32) -> Quat {
+    use std::f32::consts::FRAC_PI_2;
+
+    let q_sensor = Quat::from_xyzw(x, y, z, w);
+
+    // ENU (Z-up) -> GL (Y-up)
+    let world_fix = Quat::from_rotation_x(-FRAC_PI_2);
+
+    // Undo the portrait->landscape screen rotation on the device side.
+    let screen_angle = match DISPLAY_ROTATION.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => FRAC_PI_2,             // ROTATION_90
+        2 => std::f32::consts::PI,  // ROTATION_180
+        3 => -FRAC_PI_2,            // ROTATION_270
+        _ => 0.0,                   // ROTATION_0
+    };
+    let device_fix = Quat::from_rotation_z(screen_angle);
+
+    (world_fix * q_sensor * device_fix).normalize()
+}
+
 /// Thread-safe shared state for orientation
 struct SharedState {
     orientation: Quat,        // Current raw orientation from sensor
@@ -193,13 +236,7 @@ impl SensorInput {
                                 // info!("DATA: {:.3} {:.3} {:.3} {:.3}", x, y, z, w);
                             }
                             
-                            // Cross-talk-free axis mapping is (-y, x, z, w), but that made
-                            // every direction rotate opposite of head movement. Negating
-                            // the vector part (x,y,z) of a unit quaternion is its inverse
-                            // (conjugate) - it reverses the rotation direction on ALL axes
-                            // uniformly without reintroducing the cross-talk the (-y,x)
-                            // swap was fixing.
-                            new_quat = Quat::from_xyzw(y, -x, -z, w).normalize();
+                            new_quat = sensor_quat_to_render(x, y, z, w);
                             updated = true;
                         
                         } else if sensor_type == ASENSOR_TYPE_GYROSCOPE {
@@ -211,18 +248,23 @@ impl SensorInput {
                             if last_ts > 0 {
                                 let dt = (ts - last_ts) as f32 / 1_000_000_000.0;
                                 if dt < 0.2 {
-                                    // Inverted to match the (y, -x, -z, w) rotation-vector
-                                    // mapping above (full direction flip, same as that fix).
-                                    gyro_pitch += gy * dt;
-                                    gyro_yaw -= gx * dt;
-                                    gyro_roll -= gz * dt;
-                                    
-                                    new_quat = Quat::from_euler(
+                                    // Integrate in the DEVICE frame (the frame the gyro
+                                    // actually reports in), then run the result through the
+                                    // same ENU->GL + screen-rotation change of basis as the
+                                    // rotation-vector path so both paths agree.
+                                    gyro_pitch += gx * dt;
+                                    gyro_yaw   += gy * dt;
+                                    gyro_roll  += gz * dt;
+
+                                    let device_q = Quat::from_euler(
                                         glam::EulerRot::YXZ,
                                         gyro_yaw,
                                         gyro_pitch,
                                         gyro_roll,
                                     );
+                                    let (dx, dy, dz, dw) =
+                                        (device_q.x, device_q.y, device_q.z, device_q.w);
+                                    new_quat = sensor_quat_to_render(dx, dy, dz, dw);
                                     updated = true;
                                 }
                             }
