@@ -56,17 +56,29 @@ pub fn stereo_label(mode: u8) -> &'static str {
 
 pub enum MenuState { Main, LensSettings, WebBrowser }
 
-// ── macOS-style center dock ───────────────────────────────────────────────────
+// ── Material 3 Expressive colour roles (dark scheme, baseline violet) ─────────
+// Google's M3 dark tonal palette: surfaces are low-chroma neutrals, primary is the
+// tone-80 accent with tone-20 "on" colours, so accented controls read as light-on-
+// dark rather than the flat blue-on-white the old dock used.
+pub const M3_SURFACE_CONTAINER: Color32       = Color32::from_rgba_premultiplied(28, 27, 31, 242);
+pub const M3_SURFACE_HIGH: Color32            = Color32::from_rgb(54, 52, 59);
+pub const M3_ON_SURFACE: Color32              = Color32::from_rgb(230, 224, 233);
+pub const M3_PRIMARY: Color32                 = Color32::from_rgb(208, 188, 255);
+pub const M3_ON_PRIMARY: Color32              = Color32::from_rgb(56, 30, 114);
+pub const M3_SECONDARY_CONTAINER: Color32     = Color32::from_rgb(74, 68, 88);
+pub const M3_ON_SECONDARY_CONTAINER: Color32  = Color32::from_rgb(232, 222, 248);
+pub const M3_ERROR: Color32                   = Color32::from_rgb(242, 184, 181);
+pub const M3_ON_ERROR: Color32                = Color32::from_rgb(96, 20, 16);
+pub const M3_ERROR_SOFT: Color32              = Color32::from_rgb(242, 184, 181);
+
+// ── Center dock ───────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum DockItem {
     Recenter,
-    Gyro,
     Files,
-    Web,
     Firefox,
-    NewTab,
-    CloseTab,
+    Keyboard,
     Stereo3D,
     SeekBack,
     PlayPause,
@@ -75,14 +87,14 @@ pub enum DockItem {
     Exit,
 }
 
-pub const DOCK_ITEMS: [DockItem; 13] = [
+/// Trimmed to what actually does something. Removed: Gyro (no visible effect),
+/// Web (duplicate of Firefox - both call activate_browser(1)), and New/Close Tab
+/// (multi-tab UI isn't built yet, so they were dead controls taking up space).
+pub const DOCK_ITEMS: [DockItem; 10] = [
     DockItem::Recenter,
-    DockItem::Gyro,
     DockItem::Files,
-    DockItem::Web,
     DockItem::Firefox,
-    DockItem::NewTab,
-    DockItem::CloseTab,
+    DockItem::Keyboard,
     DockItem::Stereo3D,
     DockItem::SeekBack,
     DockItem::PlayPause,
@@ -95,12 +107,9 @@ impl DockItem {
     fn icon(&self) -> &'static str {
         match self {
             DockItem::Recenter  => "◎",
-            DockItem::Gyro      => "🧭",
             DockItem::Files     => "📁",
-            DockItem::Web       => "🌐",
             DockItem::Firefox   => "🦊",
-            DockItem::NewTab    => "➕",
-            DockItem::CloseTab  => "⊝",
+            DockItem::Keyboard  => "⌨",
             DockItem::Stereo3D  => "🥽",
             DockItem::SeekBack  => "⏪",
             DockItem::PlayPause => "⏯",
@@ -112,12 +121,9 @@ impl DockItem {
     fn label(&self) -> &'static str {
         match self {
             DockItem::Recenter  => "Recenter",
-            DockItem::Gyro      => "Gyro",
             DockItem::Files     => "Files",
-            DockItem::Web       => "Web",
-            DockItem::Firefox   => "Firefox",
-            DockItem::NewTab    => "New Tab",
-            DockItem::CloseTab  => "Close Tab",
+            DockItem::Firefox   => "Browser",
+            DockItem::Keyboard  => "Keyboard",
             DockItem::Stereo3D  => "3D Mode",
             DockItem::SeekBack  => "-10s",
             DockItem::PlayPause => "Play/Pause",
@@ -428,13 +434,18 @@ impl VrKeyboard {
     fn render(&self, ui: &mut egui::Ui) {
         for (r, row) in KB_ROWS.iter().enumerate() {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 for (c, ch) in row.chars().enumerate() {
                     let selected = r == self.row && c == self.col;
+                    let size = if selected { 72.0 } else { 60.0 };
                     let label = egui::RichText::new(ch.to_string())
-                        .size(if selected { 34.0 } else { 26.0 })
-                        .color(Color32::WHITE);
-                    let mut btn = egui::Button::new(label).min_size(egui::vec2(64.0, 64.0));
-                    if selected { btn = btn.fill(Color32::from_rgb(80, 160, 255)); }
+                        .size(if selected { 36.0 } else { 26.0 })
+                        .color(if selected { M3_ON_PRIMARY } else { M3_ON_SURFACE });
+                    let btn = egui::Button::new(label)
+                        .min_size(egui::vec2(size, size))
+                        // Same shape morph as the dock: rounded square -> pill.
+                        .rounding(Rounding::same(if selected { size / 2.0 } else { 18.0 }))
+                        .fill(if selected { M3_PRIMARY } else { M3_SURFACE_HIGH });
                     ui.add(btn);
                 }
             });
@@ -501,15 +512,16 @@ impl VrUi {
     pub fn dock_activate(&mut self) {
         match DOCK_ITEMS[self.dock_selected] {
             DockItem::Recenter  => self.params.recenter_flag = true,
-            DockItem::Gyro      => self.params.gyro_enabled = !self.params.gyro_enabled,
             DockItem::Files     => {
                 self.file_browser.visible = true;
                 if self.file_browser.entries.is_empty() { self.file_browser.refresh_entries(); }
                 self.main_menu_visible = false;
             }
-            DockItem::Web | DockItem::Firefox => self.activate_browser(1),
-            DockItem::NewTab    => { if !self.params.web_mode { self.activate_browser(1); } self.web_browser.new_tab = true; self.main_menu_visible = false; }
-            DockItem::CloseTab  => self.web_browser.close_tab = true,
+            DockItem::Firefox   => self.activate_browser(1),
+            DockItem::Keyboard  => {
+                self.keyboard.visible = true;
+                self.main_menu_visible = false;
+            }
             DockItem::Stereo3D  => {
                 self.params.stereo_mode = (self.params.stereo_mode + 1) % STEREO_MODES;
             }
@@ -561,46 +573,66 @@ impl VrUi {
             self.render_lens_settings(ctx);
             return;
         }
+        // Material 3 Expressive: a tonal "surface container" bar with a fully-rounded
+        // (pill) outer shape, and shape morphing on the selection - the unselected
+        // items are squircle-ish rounded squares, the selected one swells and morphs
+        // to a full pill in the M3E accent colour. Emphasis comes from size + shape +
+        // tone together, which is the core of the expressive spec.
         egui::Window::new("dock")
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .resizable(false).collapsible(false).title_bar(false)
             .frame(egui::Frame::window(&ctx.style())
-                .inner_margin(Margin::same(18.0))
-                .rounding(Rounding::same(28.0))
-                .stroke(Stroke::new(1.0, Color32::from_white_alpha(30)))
-                .fill(Color32::from_rgba_unmultiplied(24, 24, 32, 235)))
+                .inner_margin(Margin::symmetric(24.0, 20.0))
+                .rounding(Rounding::same(64.0))
+                .stroke(Stroke::new(1.5, Color32::from_rgba_unmultiplied(208, 188, 255, 45)))
+                .fill(M3_SURFACE_CONTAINER))
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 12.0;
+                        ui.spacing_mut().item_spacing.x = 14.0;
                         for (i, item) in DOCK_ITEMS.iter().enumerate() {
                             let selected = i == self.dock_selected;
-                            let toggled = matches!(item, DockItem::Gyro if self.params.gyro_enabled)
-                                || matches!(item, DockItem::Web | DockItem::Firefox if self.params.web_mode);
-                            let size = if selected { 100.0 } else { 74.0 };
-                            let icon_size = if selected { 52.0 } else { 36.0 };
-                            let bg = if selected { Color32::from_rgb(70, 140, 250) }
-                                else if toggled { Color32::from_rgb(45, 90, 150) }
-                                else { Color32::from_rgba_unmultiplied(45, 45, 58, 230) };
-                            let icon_col = if *item == DockItem::Exit && !selected {
-                                Color32::from_rgb(255, 110, 110)
-                            } else { Color32::WHITE };
+                            let toggled = matches!(item, DockItem::Firefox if self.params.web_mode)
+                                || matches!(item, DockItem::Keyboard if self.keyboard.visible);
+                            let is_exit = *item == DockItem::Exit;
+
+                            let size = if selected { 104.0 } else { 78.0 };
+                            let icon_size = if selected { 50.0 } else { 34.0 };
+                            // Shape morph: rounded-square at rest -> pill when selected.
+                            let radius = if selected { size / 2.0 } else { 26.0 };
+
+                            let (bg, icon_col) = if selected {
+                                if is_exit { (M3_ERROR, M3_ON_ERROR) }
+                                else { (M3_PRIMARY, M3_ON_PRIMARY) }
+                            } else if toggled {
+                                (M3_SECONDARY_CONTAINER, M3_ON_SECONDARY_CONTAINER)
+                            } else if is_exit {
+                                (M3_SURFACE_HIGH, M3_ERROR_SOFT)
+                            } else {
+                                (M3_SURFACE_HIGH, M3_ON_SURFACE)
+                            };
+
                             let btn = egui::Button::new(
                                     egui::RichText::new(item.icon()).size(icon_size).color(icon_col))
                                 .min_size(egui::vec2(size, size))
-                                .rounding(Rounding::same(20.0))
+                                .rounding(Rounding::same(radius))
+                                .stroke(if selected {
+                                    Stroke::new(2.0, Color32::from_white_alpha(60))
+                                } else { Stroke::NONE })
                                 .fill(bg);
                             let resp = ui.add(btn);
                             if resp.clicked() { self.dock_selected = i; self.dock_activate(); }
                             if resp.hovered() { self.dock_selected = i; }
                         }
                     });
-                    ui.add_space(10.0);
+
+                    ui.add_space(14.0);
                     let sel = DOCK_ITEMS[self.dock_selected];
                     let label = if sel == DockItem::Stereo3D {
                         stereo_label(self.params.stereo_mode)
                     } else { sel.label() };
-                    ui.label(egui::RichText::new(label).size(26.0).strong().color(Color32::WHITE));
+                    // M3E display-style label: large, tight, high-contrast.
+                    ui.label(egui::RichText::new(label).size(30.0).strong().color(M3_ON_SURFACE));
                 });
             });
     }
@@ -855,15 +887,31 @@ impl VrUi {
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .resizable(false).collapsible(false).title_bar(false)
             .frame(egui::Frame::window(&ctx.style())
-                .inner_margin(Margin::same(14.0))
-                .rounding(Rounding::same(18.0))
-                .fill(Color32::from_rgb(18, 18, 24)))
+                .inner_margin(Margin::same(22.0))
+                .rounding(Rounding::same(36.0))
+                .stroke(Stroke::new(1.5, Color32::from_rgba_unmultiplied(208, 188, 255, 45)))
+                .fill(M3_SURFACE_CONTAINER))
             .show(ctx, |ui| {
-                if !self.keyboard.input.is_empty() {
-                    ui.label(egui::RichText::new(&self.keyboard.input).size(22.0).color(Color32::WHITE));
-                    ui.separator();
-                }
+                // M3 text field: filled tonal surface, always visible so it's obvious
+                // where the typed text is going even before anything is typed.
+                egui::Frame::none()
+                    .fill(M3_SURFACE_HIGH)
+                    .rounding(Rounding::same(16.0))
+                    .inner_margin(Margin::symmetric(18.0, 12.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(600.0);
+                        let (text, col) = if self.keyboard.input.is_empty() {
+                            ("Search or enter address".to_string(), Color32::from_rgb(148, 143, 153))
+                        } else {
+                            (format!("{}|", self.keyboard.input), M3_ON_SURFACE)
+                        };
+                        ui.label(egui::RichText::new(text).size(26.0).color(col));
+                    });
+                ui.add_space(14.0);
                 self.keyboard.render(ui);
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("X type   ○ delete   Options go   △ close")
+                    .size(18.0).color(Color32::from_rgb(148, 143, 153)));
             });
     }
 

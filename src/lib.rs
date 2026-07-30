@@ -25,6 +25,12 @@ mod gamepad;
 mod thumbs;
 mod webview;
 
+/// Content zoom limits. The old 3.0 ceiling made the screen stop growing well
+/// before it filled the field of view on a wide panel; 8.0 lets it go properly
+/// cinema-sized, and the lower bound gets a bit more room to pull back too.
+const ZOOM_MIN: f32 = 0.3;
+const ZOOM_MAX: f32 = 8.0;
+
 /// Main application state
 struct VRApp {
     window: Option<Arc<Window>>,
@@ -306,27 +312,72 @@ impl ApplicationHandler for VRApp {
                         }
                     }
 
+                    // Typed text was previously stranded in the keyboard - route a
+                    // submitted string into the browser as a URL/search navigation.
+                    if let Some(text) = ui.keyboard.take_commit() {
+                        if !text.trim().is_empty() {
+                            let target = if text.contains('.') && !text.contains(' ') {
+                                if text.starts_with("http") { text.clone() }
+                                else { format!("https://{}", text) }
+                            } else {
+                                format!("https://duckduckgo.com/?q={}", text.replace(' ', "+"))
+                            };
+                            info!("Keyboard commit -> navigate: {}", target);
+                            ui.web_browser.url_bar = target.clone();
+                            ui.web_browser.pending_url = Some(target);
+                            if !ui.params.web_mode {
+                                ui.params.web_mode = true;
+                                ui.params.pending_engine = Some(1);
+                            }
+                        }
+                    }
+
                     // ── Menu-gated controls ─────────────────────────────────
-                    if ui.file_browser.visible {
-                        // Media Center: left-stick coverflow sweep + D-pad; X open; O up; △ close
+                    // Every opener is a TOGGLE: pressing the same button again closes
+                    // what it opened, so you can never get stuck in a panel.
+                    //   △        -> virtual keyboard
+                    //   Options  -> dock
+                    //   Create   -> Media Center
+                    if ui.keyboard.visible {
+                        // Keyboard: D-pad picks a key, X types it, O backspaces,
+                        // Options submits, △ dismisses.
+                        if gp_actions.nav_left  { ui.keyboard.move_left(); }
+                        if gp_actions.nav_right { ui.keyboard.move_right(); }
+                        if gp_actions.nav_up    { ui.keyboard.move_up(); }
+                        if gp_actions.nav_down  { ui.keyboard.move_down(); }
+                        if gp_actions.play_pause || gp_actions.confirm { ui.keyboard.press(); }
+                        if gp_actions.back          { ui.keyboard.backspace(); }
+                        if gp_actions.open_settings { ui.keyboard.submit(); }
+                        if gp_actions.toggle_ui     { ui.keyboard.visible = false; }
+                    } else if ui.file_browser.visible {
+                        // Media Center: left-stick coverflow sweep + D-pad; X open; O up.
                         ui.file_browser.handle_stick(gp_actions.left_stick_x);
                         if gp_actions.nav_up   || gp_actions.nav_left  { ui.file_browser.move_up(); }
                         if gp_actions.nav_down || gp_actions.nav_right { ui.file_browser.move_down(); }
                         if gp_actions.play_pause || gp_actions.confirm { ui.file_browser.select_current(); }
-                        if gp_actions.back      { ui.file_browser.go_back(); }
-                        if gp_actions.toggle_ui { ui.file_browser.visible = false; }
+                        if gp_actions.back { ui.file_browser.go_back(); }
+                        // Create closes it again (it's what opened it), Options swaps to the dock.
+                        if gp_actions.open_file_picker { ui.file_browser.visible = false; }
+                        if gp_actions.open_settings {
+                            ui.file_browser.visible = false;
+                            ui.main_menu_visible = true;
+                        }
+                        if gp_actions.toggle_ui { ui.keyboard.visible = true; }
                     } else if ui.main_menu_visible {
-                        // Dock: D-pad left/right move highlight, X/□ activate, △/○ close
+                        // Dock: D-pad left/right move highlight, X activate, Options/O close.
                         if gp_actions.nav_left  { ui.dock_move_left(); }
                         if gp_actions.nav_right { ui.dock_move_right(); }
                         if gp_actions.play_pause || gp_actions.confirm { ui.dock_activate(); }
-                        if gp_actions.toggle_ui || gp_actions.back || gp_actions.open_settings {
+                        if gp_actions.back || gp_actions.open_settings {
                             ui.main_menu_visible = false;
                         }
+                        if gp_actions.toggle_ui { ui.keyboard.visible = true; }
                     } else {
-                        // No menu: △/Options open dock, Create opens media center, X play/pause,
-                        // L1/R1 seek, D-pad L/R cycle the 3D layout.
-                        if gp_actions.toggle_ui || gp_actions.open_settings { ui.main_menu_visible = true; }
+                        // No menu: Options opens dock, Create opens Media Center,
+                        // △ opens the keyboard, X play/pause, L1/R1 seek,
+                        // D-pad L/R cycle the 3D layout.
+                        if gp_actions.open_settings { ui.main_menu_visible = true; }
+                        if gp_actions.toggle_ui     { ui.keyboard.visible = true; }
                         if gp_actions.open_file_picker {
                             ui.file_browser.visible = true;
                             ui.file_browser.refresh_entries();
@@ -361,15 +412,15 @@ impl ApplicationHandler for VRApp {
                     const ZOOM_SPEED: f32 = 0.05;
                     if gp_actions.r2_trigger > TRIGGER_DEADZONE {
                         ui.params.content_scale =
-                            (ui.params.content_scale + ZOOM_SPEED * gp_actions.r2_trigger).min(3.0);
+                            (ui.params.content_scale + ZOOM_SPEED * gp_actions.r2_trigger).min(ZOOM_MAX);
                     } else if gp_actions.zoom_in {
-                        ui.params.content_scale = (ui.params.content_scale + 0.02).min(3.0);
+                        ui.params.content_scale = (ui.params.content_scale + 0.02).min(ZOOM_MAX);
                     }
                     if gp_actions.l2_trigger > TRIGGER_DEADZONE {
                         ui.params.content_scale =
-                            (ui.params.content_scale - ZOOM_SPEED * gp_actions.l2_trigger).max(0.5);
+                            (ui.params.content_scale - ZOOM_SPEED * gp_actions.l2_trigger).max(ZOOM_MIN);
                     } else if gp_actions.zoom_out {
-                        ui.params.content_scale = (ui.params.content_scale - 0.02).max(0.5);
+                        ui.params.content_scale = (ui.params.content_scale - 0.02).max(ZOOM_MIN);
                     }
                     
                     // D-pad volume controls (when D-pad events work)
@@ -621,7 +672,7 @@ impl ApplicationHandler for VRApp {
                                 // Calculate zoom factor
                                 let scale_factor = (current_dist / initial_dist) as f32;
                                 let new_scale = (self.initial_content_scale * scale_factor)
-                                    .clamp(0.5, 3.0);
+                                    .clamp(ZOOM_MIN, ZOOM_MAX);
                                 
                                 if let Some(ui) = &mut self.vr_ui {
                                     ui.params.content_scale = new_scale;

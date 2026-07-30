@@ -58,7 +58,12 @@ fn sensor_quat_to_render(x: f32, y: f32, z: f32, w: f32) -> Quat {
     };
     let device_fix = Quat::from_rotation_z(screen_angle);
 
-    (world_fix * q_sensor * device_fix).normalize()
+    // The basis change above gets the AXES right (no cross-talk: yaw is yaw, pitch is
+    // pitch). But the composed result is world->camera, and the renderer already does
+    // `Mat4::from_quat(orientation.inverse())` expecting camera->world - so the
+    // rotation was being undone twice, which is exactly the symptom: correct axes,
+    // every one of them reversed. Invert once here to hand back camera->world.
+    (world_fix * q_sensor * device_fix).normalize().inverse()
 }
 
 /// Thread-safe shared state for orientation
