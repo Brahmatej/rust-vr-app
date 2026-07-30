@@ -405,7 +405,20 @@ impl ApplicationHandler for VRApp {
                         if gp_actions.nav_up {
                             ui.params.projection_mode =
                                 (ui.params.projection_mode + 1) % ui::PROJECTION_MODES;
-                            info!("Projection -> {}", ui::projection_label(ui.params.projection_mode));
+                            // Entering a dome from mono: VR180/VR360 footage is
+                            // overwhelmingly side-by-side stereo, and the per-eye split
+                            // lives in stereo_mode (independent of projection), so
+                            // switching to a dome while still in 2D showed the whole
+                            // packed frame to both eyes instead of half each. Default to
+                            // SBS; D-pad left/right still overrides.
+                            let dome = matches!(ui.params.projection_mode, 1 | 2);
+                            if dome && ui.params.stereo_mode == 0 {
+                                ui.params.stereo_mode = 1;
+                                info!("Dome: auto-enabling side-by-side");
+                            }
+                            info!("Projection -> {} ({})",
+                                ui::projection_label(ui.params.projection_mode),
+                                ui::stereo_label(ui.params.stereo_mode));
                         }
                         // D-pad down flips head-tracking direction (see sensors.rs).
                         if gp_actions.nav_down {
@@ -442,7 +455,19 @@ impl ApplicationHandler for VRApp {
                     if let Some(selected_path) = ui.file_browser.take_selected_file() {
                         let path_str = selected_path.to_string_lossy().to_string();
                         info!("File Browser: Selected {}", path_str);
-                        
+
+                        // Leave web mode: the fragment shader draws the browser texture
+                        // in preference to video (is_web is checked first), so starting
+                        // playback while web_mode was still set played the audio/video
+                        // but kept the browser page on screen.
+                        if ui.params.web_mode {
+                            info!("Leaving web mode for video playback");
+                            ui.params.web_mode = false;
+                            ui.menu_state = ui::MenuState::Main;
+                        }
+                        // Close the Media Center so the video it just started is visible.
+                        ui.file_browser.visible = false;
+
                         // Start playing the selected video file
                         if let Some(decoder) = &mut self.ndk_decoder {
                             decoder.stop();

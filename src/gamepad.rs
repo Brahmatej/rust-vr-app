@@ -108,9 +108,64 @@ pub mod keycodes {
     pub const DPAD_RIGHT: i32 = 22;
 }
 
+/// Sticky press latch.
+///
+/// Button state used to be sampled once per frame and compared against the
+/// previous frame, so a press whose DOWN and UP both landed between two frames
+/// vanished entirely - and the HAT path could clear a d-pad bit that the key
+/// path had just set, before the frame ever sampled it. That is why buttons
+/// (the d-pad especially) needed several presses to register once. Every press
+/// now also sets a sticky bit here, which poll_actions drains, so an edge can
+/// never be missed regardless of frame timing.
+static PRESS_LATCH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+mod latch_bits {
+    pub const SOUTH: u32   = 1 << 0;
+    pub const EAST: u32    = 1 << 1;
+    pub const WEST: u32    = 1 << 2;
+    pub const NORTH: u32   = 1 << 3;
+    pub const L1: u32      = 1 << 4;
+    pub const R1: u32      = 1 << 5;
+    pub const START: u32   = 1 << 6;
+    pub const SELECT: u32  = 1 << 7;
+    pub const MODE: u32    = 1 << 8;
+    pub const DP_UP: u32   = 1 << 9;
+    pub const DP_DOWN: u32 = 1 << 10;
+    pub const DP_LEFT: u32 = 1 << 11;
+    pub const DP_RIGHT: u32= 1 << 12;
+    pub const THUMBL: u32  = 1 << 13;
+    pub const THUMBR: u32  = 1 << 14;
+}
+
+fn latch(bit: u32) {
+    PRESS_LATCH.fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Called from lib.rs when a gamepad button event is received
 pub fn handle_button(key_code: i32, pressed: bool) {
     let mut state = GAMEPAD_STATE.lock().unwrap();
+
+    if pressed {
+        let bit = match key_code {
+            keycodes::BUTTON_A => latch_bits::SOUTH,
+            keycodes::BUTTON_B => latch_bits::EAST,
+            keycodes::BUTTON_X => latch_bits::WEST,
+            keycodes::BUTTON_Y => latch_bits::NORTH,
+            keycodes::BUTTON_L1 => latch_bits::L1,
+            keycodes::BUTTON_R1 => latch_bits::R1,
+            keycodes::BUTTON_START => latch_bits::START,
+            keycodes::BUTTON_SELECT => latch_bits::SELECT,
+            keycodes::BUTTON_MODE => latch_bits::MODE,
+            keycodes::BUTTON_THUMBL => latch_bits::THUMBL,
+            keycodes::BUTTON_THUMBR => latch_bits::THUMBR,
+            keycodes::DPAD_UP => latch_bits::DP_UP,
+            keycodes::DPAD_DOWN => latch_bits::DP_DOWN,
+            keycodes::DPAD_LEFT => latch_bits::DP_LEFT,
+            keycodes::DPAD_RIGHT => latch_bits::DP_RIGHT,
+            _ => 0,
+        };
+        if bit != 0 { latch(bit); }
+    }
     
     match key_code {
         keycodes::BUTTON_A => state.btn_south = pressed,
@@ -155,27 +210,32 @@ pub fn get_state() -> GamepadState {
 pub fn poll_actions() -> GamepadActions {
     let current = GAMEPAD_STATE.lock().unwrap().clone();
     let mut prev = PREV_STATE.lock().unwrap();
+
+    // Drain the sticky latch: a bit set here means a press happened since the
+    // last poll even if the button was already back up by sampling time.
+    let l = PRESS_LATCH.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let hit = |bit: u32| (l & bit) != 0;
     
     // Detect rising edges (button just pressed)
     let actions = GamepadActions {
         // Media
-        play_pause: current.btn_south && !prev.btn_south,      // X
-        seek_back: current.btn_l1 && !prev.btn_l1,             // L1
-        seek_forward: current.btn_r1 && !prev.btn_r1,          // R1
+        play_pause: (current.btn_south && !prev.btn_south) || hit(latch_bits::SOUTH),   // X
+        seek_back: (current.btn_l1 && !prev.btn_l1) || hit(latch_bits::L1),             // L1
+        seek_forward: (current.btn_r1 && !prev.btn_r1) || hit(latch_bits::R1),          // R1
         
         // UI
-        toggle_ui: current.btn_north && !prev.btn_north,       // △
-        confirm: current.btn_west && !prev.btn_west,           // □
-        back: current.btn_east && !prev.btn_east,              // ○
+        toggle_ui: (current.btn_north && !prev.btn_north) || hit(latch_bits::NORTH),    // △
+        confirm: (current.btn_west && !prev.btn_west) || hit(latch_bits::WEST),         // □
+        back: (current.btn_east && !prev.btn_east) || hit(latch_bits::EAST),            // ○
         
         // VR
-        reset_view: current.btn_thumbl && !prev.btn_thumbl,    // L3
-        toggle_vr_mode: current.btn_thumbr && !prev.btn_thumbr, // R3
+        reset_view: (current.btn_thumbl && !prev.btn_thumbl) || hit(latch_bits::THUMBL),// L3
+        toggle_vr_mode: (current.btn_thumbr && !prev.btn_thumbr) || hit(latch_bits::THUMBR), // R3
         
         // App
-        open_settings: current.btn_start && !prev.btn_start,   // Options
-        open_file_picker: current.btn_select && !prev.btn_select, // Create
-        exit_app: current.btn_mode && !prev.btn_mode,          // PS
+        open_settings: (current.btn_start && !prev.btn_start) || hit(latch_bits::START),// Options
+        open_file_picker: (current.btn_select && !prev.btn_select) || hit(latch_bits::SELECT), // Create
+        exit_app: (current.btn_mode && !prev.btn_mode) || hit(latch_bits::MODE),        // PS
         
         // Zoom (continuous while held)
         zoom_in: current.btn_r2,
@@ -184,10 +244,10 @@ pub fn poll_actions() -> GamepadActions {
         r2_trigger: current.r2_trigger,
         
         // Navigation
-        nav_up: current.btn_dpad_up && !prev.btn_dpad_up,
-        nav_down: current.btn_dpad_down && !prev.btn_dpad_down,
-        nav_left: current.btn_dpad_left && !prev.btn_dpad_left,
-        nav_right: current.btn_dpad_right && !prev.btn_dpad_right,
+        nav_up: (current.btn_dpad_up && !prev.btn_dpad_up) || hit(latch_bits::DP_UP),
+        nav_down: (current.btn_dpad_down && !prev.btn_dpad_down) || hit(latch_bits::DP_DOWN),
+        nav_left: (current.btn_dpad_left && !prev.btn_dpad_left) || hit(latch_bits::DP_LEFT),
+        nav_right: (current.btn_dpad_right && !prev.btn_dpad_right) || hit(latch_bits::DP_RIGHT),
         left_stick_x: current.left_stick_x,
         left_stick_y: current.left_stick_y,
         right_stick_x: current.right_stick_x,
@@ -278,10 +338,17 @@ pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onDpadAxis(
     // d-pad button booleans — otherwise the nav_up/down/left/right actions (which
     // edge-detect on those booleans) never fire for the D-pad.
     if let Ok(mut state) = GAMEPAD_STATE.lock() {
-        state.btn_dpad_left  = hat_x < -0.5;
-        state.btn_dpad_right = hat_x >  0.5;
-        state.btn_dpad_up    = hat_y < -0.5;
-        state.btn_dpad_down  = hat_y >  0.5;
+        let (l, r, u, d) = (hat_x < -0.5, hat_x > 0.5, hat_y < -0.5, hat_y > 0.5);
+        // Latch on the rising edge here too - the HAT can return to centre before the
+        // next frame samples it, and it must not silently clear a key-path press.
+        if l && !state.btn_dpad_left  { latch(latch_bits::DP_LEFT); }
+        if r && !state.btn_dpad_right { latch(latch_bits::DP_RIGHT); }
+        if u && !state.btn_dpad_up    { latch(latch_bits::DP_UP); }
+        if d && !state.btn_dpad_down  { latch(latch_bits::DP_DOWN); }
+        state.btn_dpad_left  = l;
+        state.btn_dpad_right = r;
+        state.btn_dpad_up    = u;
+        state.btn_dpad_down  = d;
     }
     info!("JNI: D-pad HAT x={} y={}", hat_x, hat_y);
 }

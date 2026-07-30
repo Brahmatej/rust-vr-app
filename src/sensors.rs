@@ -24,7 +24,13 @@ static SAVED_REFERENCE: OnceLock<Mutex<Quat>> = OnceLock::new();
 static DISPLAY_ROTATION: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
 
 /// Runtime head-tracking direction flip, toggled with D-pad down.
-static HEAD_INVERT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+///
+/// Defaults to TRUE. It took three D-pad-down presses to correct the tracking,
+/// and three toggles of a boolean is the same as one - so exactly one flip from
+/// the old default is what's wanted, and the extra presses were the dropped-input
+/// bug (see the press latch in gamepad.rs), not extra flips. That makes "inverted"
+/// the correct compiled default.
+static HEAD_INVERT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Flip head-tracking direction. Returns the new state.
 pub fn toggle_head_invert() -> bool {

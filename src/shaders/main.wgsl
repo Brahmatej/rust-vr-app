@@ -73,12 +73,18 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     var arc_h = screen_w / radius;
     var arc_v = screen_h / radius;
 
+    // Dome zoom: the span is set by the format, so zooming can't grow a quad the way
+    // it does for the flat screen - instead NARROW the arc, which magnifies the image
+    // across the same view (an optical zoom rather than a bigger screen). Clamped so
+    // it can't collapse to a point or wrap past the source.
+    let dome_zoom = clamp(scale, 0.35, 6.0);
+
     if (pmode > 0.5 && pmode < 1.5) {             // 180° dome
-        arc_h = 3.14159265;
-        arc_v = 3.14159265 * 0.5;
+        arc_h = 3.14159265 / dome_zoom;
+        arc_v = (3.14159265 * 0.5) / dome_zoom;
     } else if (pmode > 1.5 && pmode < 2.5) {      // 360° dome
-        arc_h = 6.28318531;
-        arc_v = 3.14159265;
+        arc_h = 6.28318531 / dome_zoom;
+        arc_v = 3.14159265 / dome_zoom;
     } else if (pmode > 2.5) {                     // vertical / portrait
         // Tall panel: swap the aspect so portrait video fills the height.
         let vert_h = base_h * scale * 1.9;
