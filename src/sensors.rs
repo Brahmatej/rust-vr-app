@@ -23,6 +23,16 @@ static SAVED_REFERENCE: OnceLock<Mutex<Quat>> = OnceLock::new();
 /// usual landscape the headset sits in) until the first report arrives.
 static DISPLAY_ROTATION: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
 
+/// Runtime head-tracking direction flip, toggled with D-pad down.
+static HEAD_INVERT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Flip head-tracking direction. Returns the new state.
+pub fn toggle_head_invert() -> bool {
+    let v = !HEAD_INVERT.load(std::sync::atomic::Ordering::Relaxed);
+    HEAD_INVERT.store(v, std::sync::atomic::Ordering::Relaxed);
+    v
+}
+
 pub fn set_display_rotation(rotation: i32) {
     info!("Sensors: display rotation = {}", rotation);
     DISPLAY_ROTATION.store(rotation, std::sync::atomic::Ordering::Relaxed);
@@ -59,11 +69,16 @@ fn sensor_quat_to_render(x: f32, y: f32, z: f32, w: f32) -> Quat {
     let device_fix = Quat::from_rotation_z(screen_angle);
 
     // The basis change above gets the AXES right (no cross-talk: yaw is yaw, pitch is
-    // pitch). But the composed result is world->camera, and the renderer already does
-    // `Mat4::from_quat(orientation.inverse())` expecting camera->world - so the
-    // rotation was being undone twice, which is exactly the symptom: correct axes,
-    // every one of them reversed. Invert once here to hand back camera->world.
-    (world_fix * q_sensor * device_fix).normalize().inverse()
+    // pitch). Android's rotation vector is device->world and the device IS the camera,
+    // so this composition is already the camera->world rotation the renderer wants
+    // (it applies .inverse() itself to get world->camera). No extra inversion.
+    let q = (world_fix * q_sensor * device_fix).normalize();
+
+    // Runtime direction flip. Both sign conventions have now been shipped and reported
+    // as "still inverted", which is self-contradictory - so rather than keep guessing
+    // one build at a time, this makes the direction switchable on-device (D-pad down)
+    // to settle it in a single session.
+    if HEAD_INVERT.load(std::sync::atomic::Ordering::Relaxed) { q.inverse() } else { q }
 }
 
 /// Thread-safe shared state for orientation
@@ -279,6 +294,17 @@ impl SensorInput {
                         if updated {
                             if let Ok(mut s) = state.lock() {
                                 s.orientation = new_quat;
+                            }
+                            // Periodic yaw/pitch readout so the tracking direction can be
+                            // confirmed from logcat instead of inferred from description.
+                            if loop_count % 50 == 0 {
+                                let rel = new_quat;
+                                let (yaw, pitch, roll) =
+                                    rel.to_euler(glam::EulerRot::YXZ);
+                                info!(
+                                    "HEAD yaw={:.1} pitch={:.1} roll={:.1} (deg)",
+                                    yaw.to_degrees(), pitch.to_degrees(), roll.to_degrees()
+                                );
                             }
                         }
                     }

@@ -401,6 +401,17 @@ impl ApplicationHandler for VRApp {
                             ui.params.stereo_mode = (ui.params.stereo_mode + 2) % 3;
                             info!("3D -> {}", ui::stereo_label(ui.params.stereo_mode));
                         }
+                        // D-pad up cycles the screen geometry: flat -> 180 -> 360 -> vertical.
+                        if gp_actions.nav_up {
+                            ui.params.projection_mode =
+                                (ui.params.projection_mode + 1) % ui::PROJECTION_MODES;
+                            info!("Projection -> {}", ui::projection_label(ui.params.projection_mode));
+                        }
+                        // D-pad down flips head-tracking direction (see sensors.rs).
+                        if gp_actions.nav_down {
+                            let inv = sensors::toggle_head_invert();
+                            info!("Head tracking invert -> {}", inv);
+                        }
                     }
 
                     // Zoom controls (L2/R2 - always active). DualSense over Bluetooth
@@ -524,6 +535,8 @@ impl ApplicationHandler for VRApp {
 
                     renderer.stereo_mode = self.vr_ui.as_ref()
                         .map(|u| u.params.stereo_mode as u32).unwrap_or(0);
+                    renderer.projection_mode = self.vr_ui.as_ref()
+                        .map(|u| u.params.projection_mode as u32).unwrap_or(0);
                     renderer.render(orientation, ui_data, distortion_params, content_scale);
                 }
                 

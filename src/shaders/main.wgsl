@@ -61,9 +61,31 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let u_coord = f32(col + du) / f32(SCREEN_COLS);
     let v_coord = f32(row + dv) / f32(SCREEN_ROWS);
 
-    // Angular spans grow with the screen on BOTH axes (aspect preserved).
-    let arc_h = screen_w / radius;
-    let arc_v = screen_h / radius;
+    // Projection mode (camera.stereo.z): 0 = flat curved screen, 1 = 180° dome,
+    // 2 = 360° dome, 3 = vertical/portrait panel.
+    //
+    // For the dome modes the source is equirectangular, so the angular span is fixed
+    // by the FORMAT (pi for 180, 2pi for 360) rather than by the screen size - the
+    // image has to wrap the viewer at true scale or the geometry doesn't line up.
+    // This is what makes SBS 180/360 content actually work: each eye samples its half
+    // of the frame (handled in fs_main) mapped over a real hemisphere.
+    let pmode = camera.stereo.z;
+    var arc_h = screen_w / radius;
+    var arc_v = screen_h / radius;
+
+    if (pmode > 0.5 && pmode < 1.5) {             // 180° dome
+        arc_h = 3.14159265;
+        arc_v = 3.14159265 * 0.5;
+    } else if (pmode > 1.5 && pmode < 2.5) {      // 360° dome
+        arc_h = 6.28318531;
+        arc_v = 3.14159265;
+    } else if (pmode > 2.5) {                     // vertical / portrait
+        // Tall panel: swap the aspect so portrait video fills the height.
+        let vert_h = base_h * scale * 1.9;
+        arc_v = vert_h / radius;
+        arc_h = (vert_h / max(aspect, 0.1)) / radius;
+    }
+
     let theta = (u_coord - 0.5) * arc_h;
     let phi   = (0.5 - v_coord) * arc_v;          // v=0 (top) → +phi
 
@@ -125,31 +147,30 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         rgb = pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(2.2));
         return vec4<f32>(rgb, 1.0);
     } else {
-        // Fallback: Procedural test pattern
+        // Idle backdrop. The old default was a scrolling cyan test grid with a pink
+        // dot - fine as a "is the renderer alive" probe, unpleasant to actually sit
+        // in. This is a calm M3-style graded surface instead: a soft vertical ramp
+        // through the dark violet-neutral tones, a gentle radial lift behind the
+        // centre so the panel has something to sit against, and a vignette to keep
+        // the edges from glowing in the lenses.
         let time = camera.eye_offset.z;
-        
-        let grid_scale = 10.0;
-        let scroll_x = uv.x + time * 0.2;
-        let scroll_y = uv.y + sin(time) * 0.1;
-        
-        let g_x = step(0.95, fract(scroll_x * grid_scale));
-        let g_y = step(0.95, fract(scroll_y * grid_scale));
-        let grid = max(g_x, g_y);
-        
-        let center_dist = distance(uv, vec2<f32>(0.5, 0.5));
-        let circle = 1.0 - smoothstep(0.1, 0.11, center_dist);
-        
-        let base_color = vec3<f32>(0.1, 0.1, 0.2);
-        let grid_color = vec3<f32>(0.0, 0.8, 1.0);
-        let circle_color = vec3<f32>(1.0, 0.2, 0.4);
-        
-        var final_color = mix(base_color, grid_color, grid);
-        final_color = mix(final_color, circle_color, circle);
-        
-        // Screen Border
-        if (uv.x < 0.01 || uv.x > 0.99 || uv.y < 0.02 || uv.y > 0.98) {
-            return vec4<f32>(0.8, 0.8, 0.8, 1.0);
-        }
+
+        // M3 dark surface tones, linearised (~gamma 2.2) since the target is sRGB.
+        let top    = vec3<f32>(0.055, 0.050, 0.070);
+        let bottom = vec3<f32>(0.015, 0.014, 0.022);
+        var final_color = mix(top, bottom, uv.y);
+
+        // Soft centre glow, drifting very slowly so it never looks like a dead pixel field.
+        let drift = vec2<f32>(0.5 + sin(time * 0.08) * 0.02,
+                              0.42 + cos(time * 0.06) * 0.02);
+        let d = distance(uv, drift);
+        let glow = 1.0 - smoothstep(0.0, 0.55, d);
+        final_color += vec3<f32>(0.050, 0.038, 0.080) * glow;
+
+        // Vignette.
+        let vig = 1.0 - smoothstep(0.45, 0.95, distance(uv, vec2<f32>(0.5, 0.5)));
+        final_color *= mix(0.55, 1.0, vig);
+
         return vec4<f32>(final_color, 1.0);
     }
 }

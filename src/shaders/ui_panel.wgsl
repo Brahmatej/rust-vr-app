@@ -28,7 +28,11 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     // (same dome math as the screen). Scales gently with content zoom, capped so it
     // never swallows the view.
     let radius  = 2.0;
-    let zoom    = clamp(camera.eye_offset.w, 0.8, 2.6);
+    // Was clamp(zoom, 0.8, 2.6): the UI panel saturated at 2.6 while the main screen
+    // scales all the way to ZOOM_MAX, so zooming in past that point grew the video but
+    // left the dock/Media Center stuck at their old size. Track the same scale the main
+    // screen uses so every layer zooms together.
+    let zoom    = max(camera.eye_offset.w, 0.1);
     let panel_h = 1.7 * zoom;                 // square (ui texture is square)
     let arc     = panel_h / radius;
 

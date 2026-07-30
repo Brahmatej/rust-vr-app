@@ -24,6 +24,9 @@ pub struct VrParams {
     pub pending_engine:     Option<i32>,
     // Stereoscopic video layout: 0 = mono, 1 = SBS, 2 = over-under.
     pub stereo_mode:        u8,
+    /// Screen geometry: 0 = flat curved screen, 1 = 180 dome, 2 = 360 dome,
+    /// 3 = vertical (portrait/tall) panel. Cycled with D-pad up.
+    pub projection_mode:    u8,
 }
 
 impl Default for VrParams {
@@ -44,11 +47,22 @@ impl Default for VrParams {
             browser_engine:     1,
             pending_engine:     None,
             stereo_mode:        0,
+            projection_mode:    0,
         }
     }
 }
 
 pub const STEREO_MODES: u8 = 3;
+pub const PROJECTION_MODES: u8 = 4;
+
+pub fn projection_label(mode: u8) -> &'static str {
+    match mode {
+        1 => "180° Dome",
+        2 => "360° Dome",
+        3 => "Vertical",
+        _ => "Flat Screen",
+    }
+}
 
 pub fn stereo_label(mode: u8) -> &'static str {
     match mode { 1 => "3D · Side-by-Side", 2 => "3D · Over-Under", _ => "2D · Mono" }
@@ -596,10 +610,10 @@ impl VrUi {
                                 || matches!(item, DockItem::Keyboard if self.keyboard.visible);
                             let is_exit = *item == DockItem::Exit;
 
-                            let size = if selected { 104.0 } else { 78.0 };
-                            let icon_size = if selected { 50.0 } else { 34.0 };
+                            let size = if selected { 132.0 } else { 100.0 };
+                            let icon_size = if selected { 68.0 } else { 48.0 };
                             // Shape morph: rounded-square at rest -> pill when selected.
-                            let radius = if selected { size / 2.0 } else { 26.0 };
+                            let radius = if selected { size / 2.0 } else { 32.0 };
 
                             let (bg, icon_col) = if selected {
                                 if is_exit { (M3_ERROR, M3_ON_ERROR) }
@@ -631,8 +645,13 @@ impl VrUi {
                     let label = if sel == DockItem::Stereo3D {
                         stereo_label(self.params.stereo_mode)
                     } else { sel.label() };
+                    let sub = format!("{}   ·   D-pad ↑ geometry   ↓ flip look",
+                        projection_label(self.params.projection_mode));
                     // M3E display-style label: large, tight, high-contrast.
-                    ui.label(egui::RichText::new(label).size(30.0).strong().color(M3_ON_SURFACE));
+                    ui.label(egui::RichText::new(label).size(34.0).strong().color(M3_ON_SURFACE));
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(sub).size(19.0)
+                        .color(Color32::from_rgb(160, 154, 168)));
                 });
             });
     }

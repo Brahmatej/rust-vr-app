@@ -71,6 +71,8 @@ pub struct Renderer {
     video_height: u32,
     // Stereoscopic video layout: 0 = mono, 1 = side-by-side, 2 = over-under.
     pub stereo_mode: u32,
+    /// 0 = flat curved screen, 1 = 180 dome, 2 = 360 dome, 3 = vertical.
+    pub projection_mode: u32,
 
     // Web (browser) RGBA texture — shown on the VR screen when in web mode.
     web_texture: wgpu::Texture,
@@ -587,6 +589,7 @@ impl Renderer {
             video_width: 1920,  // Default 16:9
             video_height: 1080,
             stereo_mode: 0,
+            projection_mode: 0,
 
             web_texture_view: web_texture.create_view(&wgpu::TextureViewDescriptor::default()),
             web_texture,
@@ -1053,7 +1056,7 @@ impl Renderer {
             // x = aspect, y = width, z = height, w = web flag (1 = show web texture)
             video_info: [scr_w / scr_h, scr_w, scr_h, if self.has_web { 1.0 } else { 0.0 }],
             // Stereo: mode + which eye (0 left, 1 right, 2 mono) — drives per-eye UV split.
-            stereo: [self.stereo_mode as f32, eye_index as f32, 0.0, 0.0],
+            stereo: [self.stereo_mode as f32, eye_index as f32, self.projection_mode as f32, 0.0],
         };
         // Write into THIS eye's region so the other eye's pass keeps its own uniforms.
         let eye_off = eye_index as u64 * EYE_STRIDE;
