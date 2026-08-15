@@ -3,7 +3,7 @@
 //! Pure NDK video decoding using AMediaCodec and AMediaExtractor.
 //! No Java, no JNI - just Rust + NDK.
 
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicI64, Ordering}};
 use std::thread::{self, JoinHandle};
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
@@ -37,6 +37,10 @@ pub struct NdkVideoDecoder {
     playback_state: Arc<Mutex<PlaybackState>>,
     running: Arc<AtomicBool>,
     decoder_thread: Option<JoinHandle<()>>,
+    /// Audio playback position in microseconds, pushed in from the main loop
+    /// each frame (-1 when no audio is playing). The decode loop paces against
+    /// this instead of wall-clock time so the picture tracks the sound.
+    audio_clock_us: Arc<AtomicI64>,
 }
 
 impl NdkVideoDecoder {
@@ -60,7 +64,13 @@ impl NdkVideoDecoder {
             })),
             running: Arc::new(AtomicBool::new(false)),
             decoder_thread: None,
+            audio_clock_us: Arc::new(AtomicI64::new(-1)),
         }
+    }
+
+    /// Publish the current audio position (microseconds, -1 for "no audio").
+    pub fn set_audio_clock_us(&self, position_us: i64) {
+        self.audio_clock_us.store(position_us, Ordering::Relaxed);
     }
 
     pub fn start(&mut self, file_path: &str) -> Result<(), String> {
@@ -114,8 +124,10 @@ impl NdkVideoDecoder {
             state.is_playing = true;
         }
 
+        let audio_clock = Arc::clone(&self.audio_clock_us);
+
         self.decoder_thread = Some(thread::spawn(move || {
-            if let Err(e) = run_mediacodec_decode_fd(fd, frame_buffer.clone(), playback_state.clone(), running.clone()) {
+            if let Err(e) = run_mediacodec_decode_fd(fd, frame_buffer.clone(), playback_state.clone(), running.clone(), audio_clock) {
                 error!("MediaCodec decode fd error: {}", e);
                 // Fall back to test pattern
                 run_test_pattern(frame_buffer, playback_state, running);
@@ -495,9 +507,10 @@ fn run_mediacodec_decode_fd(
     frame_buffer: Arc<Mutex<FrameBuffer>>,
     playback_state: Arc<Mutex<PlaybackState>>,
     running: Arc<AtomicBool>,
+    audio_clock_us: Arc<AtomicI64>,
 ) -> Result<(), String> {
     use ndk_sys::*;
-    
+
     info!("MediaCodec: Opening from fd {}", fd);
 
     // We pass i64::MAX for file length since we don't know the size from fd alone
@@ -712,9 +725,20 @@ fn run_mediacodec_decode_fd(
                 
                 AMediaCodec_releaseOutputBuffer(codec, output_idx as usize, false);
                 
-                // Measure-and-Lock Pacing Strategy
-                // 1. Measure actual frame rate from first 15 frames
-                if frames_for_estimation < 15 {
+                // Pacing. When audio is playing it is the MASTER CLOCK: hold each
+                // frame until the audio clock reaches its presentation time, and
+                // if we have fallen behind, run on without sleeping so the picture
+                // catches back up. Wall-clock pacing (the fallback below) has no
+                // way to know the audio drifted, which is why pause/seek used to
+                // desync the two permanently.
+                let audio_us = audio_clock_us.load(Ordering::Relaxed);
+                if audio_us >= 0 {
+                    let lead_ms = (pts - audio_us) / 1000;
+                    if lead_ms > 0 {
+                        // Cap the wait so a bogus clock can't stall playback.
+                        thread::sleep(std::time::Duration::from_millis(lead_ms.min(500) as u64));
+                    }
+                } else if frames_for_estimation < 15 {
                     if previous_pts >= 0 {
                         let delta = (pts - previous_pts) / 1000;
                         if delta > 0 {

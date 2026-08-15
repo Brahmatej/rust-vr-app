@@ -469,6 +469,27 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    /**
+     * Current audio playback position in milliseconds, or -1 when there is no
+     * audio playing. The NDK video decoder uses this as its MASTER CLOCK so the
+     * two pipelines stay locked together - previously video paced itself off
+     * wall-clock time and drifted away from the audio immediately.
+     */
+    public int getAudioPositionMs() {
+        MediaPlayer mediaPlayer = this.mediaPlayer;
+        if (mediaPlayer == null) {
+            return -1;
+        }
+        try {
+            if (!mediaPlayer.isPlaying()) {
+                return -1;
+            }
+            return mediaPlayer.getCurrentPosition();
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
     public void pauseAudio() {
         MediaPlayer mediaPlayer = this.mediaPlayer;
         if (mediaPlayer == null || !mediaPlayer.isPlaying()) {

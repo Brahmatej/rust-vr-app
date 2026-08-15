@@ -179,6 +179,28 @@ pub fn seek_audio(app: &AndroidApp, position_ms: i32) {
     }
 }
 
+/// Current audio position in milliseconds, or -1 when nothing is playing.
+///
+/// This is the A/V master clock: the video decoder paces itself against it
+/// instead of against wall-clock time, which is what keeps the picture locked
+/// to the sound across pause, resume and seek.
+pub fn audio_position_ms(app: &AndroidApp) -> i32 {
+    let vm = match unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM) } {
+        Ok(vm) => vm,
+        Err(_) => return -1,
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(env) => env,
+        Err(_) => return -1,
+    };
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
+
+    match env.call_method(&activity, "getAudioPositionMs", "()I", &[]) {
+        Ok(v) => v.i().unwrap_or(-1),
+        Err(_) => -1,
+    }
+}
+
 /// Increase system media volume
 pub fn volume_up(app: &AndroidApp) {
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM).unwrap() };

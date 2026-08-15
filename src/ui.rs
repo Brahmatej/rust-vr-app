@@ -645,8 +645,11 @@ impl VrUi {
                     let label = if sel == DockItem::Stereo3D {
                         stereo_label(self.params.stereo_mode)
                     } else { sel.label() };
-                    let sub = format!("{}   ·   D-pad ↑ geometry   ↓ flip look",
-                        projection_label(self.params.projection_mode));
+                    // The head-tracking basis mode is surfaced here so the user can
+                    // cycle it with D-pad down and report which one tracks correctly.
+                    let sub = format!("{}   ·   ↑ geometry   ↓ look [{}]",
+                        projection_label(self.params.projection_mode),
+                        crate::sensors::head_mode_label());
                     // M3E display-style label: large, tight, high-contrast.
                     ui.label(egui::RichText::new(label).size(34.0).strong().color(M3_ON_SURFACE));
                     ui.add_space(4.0);

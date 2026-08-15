@@ -265,35 +265,30 @@ impl ApplicationHandler for VRApp {
                         webview::resize(&self.app, w, h);
                     }
                     
+                    // 5b. Publish the audio clock so the video decoder can pace
+                    // against it. This is what actually keeps A/V in sync.
+                    if let Some(decoder) = &self.ndk_decoder {
+                        if decoder.is_running() && !decoder.is_paused() {
+                            let ms = video::audio_position_ms(&self.app);
+                            decoder.set_audio_clock_us(if ms < 0 { -1 } else { ms as i64 * 1000 });
+                        } else {
+                            decoder.set_audio_clock_us(-1);
+                        }
+                    }
+
                     // 6. Handle Playback Controls (from UI buttons)
                     if ui.params.toggle_play_pause {
-                        if let Some(decoder) = &self.ndk_decoder {
-                            if decoder.is_paused() {
-                                decoder.resume();
-                                info!("Video Resumed");
-                            } else {
-                                decoder.pause();
-                                info!("Video Paused");
-                            }
-                        }
+                        toggle_playback(&self.app, &self.ndk_decoder);
                         ui.params.toggle_play_pause = false;
                     }
-                    
+
                     if ui.params.seek_forward_flag {
-                        if let Some(decoder) = &self.ndk_decoder {
-                            let pos = decoder.get_position();
-                            decoder.seek(pos + 10_000_000); // +10 seconds
-                            info!("Seek Forward +10s");
-                        }
+                        seek_relative(&self.app, &self.ndk_decoder, 10_000_000);
                         ui.params.seek_forward_flag = false;
                     }
-                    
+
                     if ui.params.seek_backward_flag {
-                        if let Some(decoder) = &self.ndk_decoder {
-                            let pos = decoder.get_position();
-                            decoder.seek((pos - 10_000_000).max(0)); // -10 seconds
-                            info!("Seek Backward -10s");
-                        }
+                        seek_relative(&self.app, &self.ndk_decoder, -10_000_000);
                         ui.params.seek_backward_flag = false;
                     }
                     
@@ -383,15 +378,13 @@ impl ApplicationHandler for VRApp {
                             ui.file_browser.refresh_entries();
                         }
                         if gp_actions.play_pause {
-                            if let Some(decoder) = &self.ndk_decoder {
-                                if decoder.is_paused() { decoder.resume(); } else { decoder.pause(); }
-                            }
+                            toggle_playback(&self.app, &self.ndk_decoder);
                         }
                         if gp_actions.seek_back {
-                            if let Some(d) = &self.ndk_decoder { let p = d.get_position(); d.seek((p - 10_000_000).max(0)); }
+                            seek_relative(&self.app, &self.ndk_decoder, -10_000_000);
                         }
                         if gp_actions.seek_forward {
-                            if let Some(d) = &self.ndk_decoder { let p = d.get_position(); d.seek(p + 10_000_000); }
+                            seek_relative(&self.app, &self.ndk_decoder, 10_000_000);
                         }
                         if gp_actions.nav_right {
                             ui.params.stereo_mode = (ui.params.stereo_mode + 1) % 3;
@@ -420,10 +413,11 @@ impl ApplicationHandler for VRApp {
                                 ui::projection_label(ui.params.projection_mode),
                                 ui::stereo_label(ui.params.stereo_mode));
                         }
-                        // D-pad down flips head-tracking direction (see sensors.rs).
+                        // D-pad down cycles the head-tracking basis (see sensors.rs).
+                        // The active mode shows in the dock subtitle.
                         if gp_actions.nav_down {
-                            let inv = sensors::toggle_head_invert();
-                            info!("Head tracking invert -> {}", inv);
+                            sensors::cycle_head_mode();
+                            info!("Head tracking mode -> {}", sensors::head_mode_label());
                         }
                     }
 
@@ -767,4 +761,36 @@ fn android_main(app: AndroidApp) {
     
     let mut vr_app = VRApp::new(app);
     event_loop.run_app(&mut vr_app).expect("Event loop failed");
+}
+
+/// Toggle play/pause for BOTH pipelines.
+///
+/// Video is decoded natively (NdkVideoDecoder) while audio runs on a Java
+/// MediaPlayer, so a pause that only touched the decoder left the sound
+/// playing on. Every transport control has to drive both halves.
+fn toggle_playback(app: &android_activity::AndroidApp, decoder: &Option<video_ndk::NdkVideoDecoder>) {
+    let Some(decoder) = decoder else { return };
+    if decoder.is_paused() {
+        decoder.resume();
+        video::resume_audio(app);
+        info!("Playback resumed (video + audio)");
+    } else {
+        decoder.pause();
+        video::pause_audio(app);
+        info!("Playback paused (video + audio)");
+    }
+}
+
+/// Seek both pipelines by `delta_us`, clamped at zero.
+fn seek_relative(
+    app: &android_activity::AndroidApp,
+    decoder: &Option<video_ndk::NdkVideoDecoder>,
+    delta_us: i64,
+) {
+    let Some(decoder) = decoder else { return };
+    let target = (decoder.get_position() + delta_us).max(0);
+    decoder.seek(target);
+    // Move the audio too, then let the decoder re-converge on the new audio clock.
+    video::seek_audio(app, (target / 1000) as i32);
+    info!("Seek {:+}s -> {}ms", delta_us / 1_000_000, target / 1000);
 }

@@ -23,20 +23,42 @@ static SAVED_REFERENCE: OnceLock<Mutex<Quat>> = OnceLock::new();
 /// usual landscape the headset sits in) until the first report arrives.
 static DISPLAY_ROTATION: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
 
-/// Runtime head-tracking direction flip, toggled with D-pad down.
+/// Head-tracking basis mode, cycled with D-pad down.
 ///
-/// Defaults to TRUE. It took three D-pad-down presses to correct the tracking,
-/// and three toggles of a boolean is the same as one - so exactly one flip from
-/// the old default is what's wanted, and the extra presses were the dropped-input
-/// bug (see the press latch in gamepad.rs), not extra flips. That makes "inverted"
-/// the correct compiled default.
-static HEAD_INVERT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// A plain invert flag was not enough. Both `q` and `q.inverse()` have now been
+/// shipped and both were reported as "opposite in all directions", which is
+/// self-contradictory for a global inverse - so the error is NOT a sign flip, it
+/// is the DEVICE-side basis: if the headset's real screen rotation is not the one
+/// `DISPLAY_ROTATION` reports, yaw and pitch both come out reversed, and no amount
+/// of inverting fixes that.
+///
+/// So rather than burn another build per guess, all eight candidates are reachable
+/// at runtime: low two bits select the screen angle (0/90/180/270 degrees), bit 2
+/// applies the global inverse. Mode 5 (90 degrees + inverse) is what shipped last,
+/// so the default is unchanged until the user cycles.
+///
+/// The active mode is shown in the dock subtitle so it can be reported back and
+/// then compiled in as the permanent default.
+static HEAD_MODE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(5);
 
-/// Flip head-tracking direction. Returns the new state.
-pub fn toggle_head_invert() -> bool {
-    let v = !HEAD_INVERT.load(std::sync::atomic::Ordering::Relaxed);
-    HEAD_INVERT.store(v, std::sync::atomic::Ordering::Relaxed);
+pub const HEAD_MODE_COUNT: u32 = 8;
+
+/// Advance to the next basis mode. Returns the new mode.
+pub fn cycle_head_mode() -> u32 {
+    let v = (HEAD_MODE.load(std::sync::atomic::Ordering::Relaxed) + 1) % HEAD_MODE_COUNT;
+    HEAD_MODE.store(v, std::sync::atomic::Ordering::Relaxed);
     v
+}
+
+pub fn head_mode() -> u32 {
+    HEAD_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Human-readable label for the current mode, e.g. "5: 90 inv".
+pub fn head_mode_label() -> String {
+    let m = head_mode();
+    let deg = [0, 90, 180, 270][(m & 3) as usize];
+    format!("{}: {}{}", m, deg, if m >= 4 { " inv" } else { "" })
 }
 
 pub fn set_display_rotation(rotation: i32) {
@@ -65,12 +87,17 @@ fn sensor_quat_to_render(x: f32, y: f32, z: f32, w: f32) -> Quat {
     // ENU (Z-up) -> GL (Y-up)
     let world_fix = Quat::from_rotation_x(-FRAC_PI_2);
 
-    // Undo the portrait->landscape screen rotation on the device side.
-    let screen_angle = match DISPLAY_ROTATION.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => FRAC_PI_2,             // ROTATION_90
-        2 => std::f32::consts::PI,  // ROTATION_180
-        3 => -FRAC_PI_2,            // ROTATION_270
-        _ => 0.0,                   // ROTATION_0
+    // Undo the portrait->landscape screen rotation on the device side. The angle
+    // comes from HEAD_MODE rather than from DISPLAY_ROTATION: what the display
+    // reports is not necessarily the physical orientation the headset optics use,
+    // and getting this wrong reverses yaw and pitch together - exactly the reported
+    // symptom. D-pad down cycles it so the right one can be found on-device.
+    let mode = HEAD_MODE.load(std::sync::atomic::Ordering::Relaxed);
+    let screen_angle = match mode & 3 {
+        1 => FRAC_PI_2,             // 90
+        2 => std::f32::consts::PI,  // 180
+        3 => -FRAC_PI_2,            // 270
+        _ => 0.0,                   // 0
     };
     let device_fix = Quat::from_rotation_z(screen_angle);
 
@@ -84,7 +111,7 @@ fn sensor_quat_to_render(x: f32, y: f32, z: f32, w: f32) -> Quat {
     // as "still inverted", which is self-contradictory - so rather than keep guessing
     // one build at a time, this makes the direction switchable on-device (D-pad down)
     // to settle it in a single session.
-    if HEAD_INVERT.load(std::sync::atomic::Ordering::Relaxed) { q.inverse() } else { q }
+    if mode >= 4 { q.inverse() } else { q }
 }
 
 /// Thread-safe shared state for orientation
