@@ -39,7 +39,23 @@ static DISPLAY_ROTATION: std::sync::atomic::AtomicI32 = std::sync::atomic::Atomi
 ///
 /// The active mode is shown in the dock subtitle so it can be reported back and
 /// then compiled in as the permanent default.
-static HEAD_MODE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(5);
+///
+/// DEFAULT = 1 (90 degrees, NO inverse), pinned from two pieces of evidence
+/// rather than another guess:
+///
+/// 1. The required behaviour is "pitch the headset UP and the content moves
+///    DOWN" - i.e. the world stays put while the camera turns. The reported
+///    symptom was up->UP on every axis simultaneously, which means the world was
+///    rotating WITH the head. Rotating with the head on ALL THREE axes at once is
+///    precisely what applying `q.inverse()` here does, since the renderer already
+///    inverts once itself (`Mat4::from_quat(head_orientation.inverse())`).
+///    Inverting twice yields the raw rotation, so the scene tracks the head.
+/// 2. The screen angle is NOT the problem: HEAD logging showed roll sitting at
+///    ~0 deg whenever the headset was held upright. A wrong device_fix angle would
+///    bake a permanent ~90 deg roll into every upright pose, and it does not.
+///
+/// So: keep the 90 deg device_fix, drop the extra inverse.
+static HEAD_MODE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 pub const HEAD_MODE_COUNT: u32 = 8;
 
@@ -335,7 +351,8 @@ impl SensorInput {
                                 let (yaw, pitch, roll) =
                                     rel.to_euler(glam::EulerRot::YXZ);
                                 info!(
-                                    "HEAD yaw={:.1} pitch={:.1} roll={:.1} (deg)",
+                                    "HEAD [{}] yaw={:.1} pitch={:.1} roll={:.1} (deg)",
+                                    head_mode_label(),
                                     yaw.to_degrees(), pitch.to_degrees(), roll.to_degrees()
                                 );
                             }
