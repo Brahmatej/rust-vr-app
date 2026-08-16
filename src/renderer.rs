@@ -12,7 +12,7 @@ use wgpu::{
 };
 use winit::window::Window;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Quat};
 use bytemuck::{Pod, Zeroable};
 
 // Camera uniforms
@@ -82,6 +82,7 @@ pub struct Renderer {
     web_height: u32,
 
     // UI Texture (egui renders here; shown as its OWN curved panel, not composited)
+    #[allow(dead_code)]
     ui_texture: wgpu::Texture,
     ui_texture_view: wgpu::TextureView,
     // Separate curved UI panel (dock / Media Center), drawn front-and-centre.
@@ -873,7 +874,7 @@ impl Renderer {
         // 1. Render UI to Texture (Always render, even if empty/hidden, to clear texture)
         {
             // Clear UI Texture
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("UI Clear Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.ui_texture_view,

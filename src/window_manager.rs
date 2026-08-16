@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+// Panel/window management scaffolding, not wired up yet.
 //! Window Manager module
 //!
 //! Manages floating 3D panels/windows in the VR space.

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+// Gamepad helpers; several entry points staged for future bindings.
 //! Modular gamepad input for Android
 //!
 //! Captures PS5 DualSense controller input via winit KeyboardInput events.

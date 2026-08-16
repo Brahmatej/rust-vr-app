@@ -4,9 +4,6 @@ import android.app.NativeActivity;
 import android.content.Intent;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Paint;
-import android.graphics.Rect;
 import android.media.AudioManager;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
@@ -47,23 +44,13 @@ import java.util.concurrent.ThreadFactory;
 
 /* JADX INFO: loaded from: classes.dex */
 public class MainActivity extends NativeActivity {
-    private static final int MAX_WIDTH = 854;
     private static final int PICK_VIDEO_REQUEST = 1001;
     private static final String TAG = "VRAppJava";
-    private byte[] frameBuffer;
-    private Thread frameThread;
     private GamepadOverlay gamepadOverlay;
     private GeckoViewManager geckoViewManager;
     private MediaPlayer mediaPlayer;
-    private int[] pixelBuffer;
-    private MediaMetadataRetriever retriever;
     private SpeechRecognizer speechRecognizer;
     private PowerManager.WakeLock wakeLock;
-    private volatile int frameWidth = 640;
-    private volatile int frameHeight = 360;
-    private volatile boolean hasVideo = false;
-    private volatile boolean isRunning = false;
-    private final Object lock = new Object();
     private Uri currentVideoUri = null;
     private ParcelFileDescriptor currentPfd = null;
     private boolean webViewReady = false;
@@ -253,7 +240,7 @@ public class MainActivity extends NativeActivity {
             Log.i(TAG, "Got file descriptor: " + videoFd);
             onVideoFdReady(videoFd);
         }
-        startVideo(data);
+        startAudioFromUri(data);
         onVideoPicked(data.toString());
     }
 
@@ -280,7 +267,7 @@ public class MainActivity extends NativeActivity {
         return -1;
     }
 
-    private void startVideo(Uri uri) {
+    private void startAudioFromUri(Uri uri) {
         stopVideo();
         try {
             MediaPlayer mediaPlayer = new MediaPlayer();
@@ -298,113 +285,9 @@ public class MainActivity extends NativeActivity {
         } catch (Exception e) {
             Log.e(TAG, "Audio failed: " + e);
         }
-        try {
-            MediaMetadataRetriever mediaMetadataRetriever = new MediaMetadataRetriever();
-            this.retriever = mediaMetadataRetriever;
-            mediaMetadataRetriever.setDataSource(this, uri);
-            String strExtractMetadata = this.retriever.extractMetadata(18);
-            String strExtractMetadata2 = this.retriever.extractMetadata(19);
-            int i = strExtractMetadata != null ? Integer.parseInt(strExtractMetadata) : 640;
-            int i2 = strExtractMetadata2 != null ? Integer.parseInt(strExtractMetadata2) : 360;
-            if (i > MAX_WIDTH) {
-                i2 = (int) (i2 * (854.0f / i));
-                i = MAX_WIDTH;
-            }
-            this.frameWidth = i;
-            this.frameHeight = i2;
-            int i3 = this.frameWidth * this.frameHeight;
-            this.pixelBuffer = new int[i3];
-            this.frameBuffer = new byte[i3 * 4];
-            Log.i(TAG, "Video: " + this.frameWidth + "x" + this.frameHeight);
-            this.hasVideo = true;
-            this.isRunning = true;
-            Thread thread = new Thread(new Runnable() { // from class: com.vrapp.core.MainActivity.2
-                @Override // java.lang.Runnable
-                public void run() {
-                    MainActivity.this.extractFrames();
-                }
-            }, "FrameExtractor");
-            this.frameThread = thread;
-            thread.start();
-        } catch (Exception e2) {
-            Log.e(TAG, "Retriever failed: " + e2);
-            this.hasVideo = false;
-        }
-    }
-
-    /* JADX INFO: Access modifiers changed from: private */
-    public void extractFrames() {
-        MediaPlayer mediaPlayer;
-        Bitmap bitmap;
-        Bitmap bitmapCreateBitmap = null;
-        while (this.isRunning && (mediaPlayer = this.mediaPlayer) != null && this.retriever != null) {
-            try {
-                if (!mediaPlayer.isPlaying()) {
-                    Thread.sleep(50L);
-                } else {
-                    Bitmap frameAtTime = this.retriever.getFrameAtTime(((long) this.mediaPlayer.getCurrentPosition()) * 1000, 3);
-                    if (frameAtTime != null) {
-                        int i = 0;
-                        if (frameAtTime.getWidth() == this.frameWidth && frameAtTime.getHeight() == this.frameHeight) {
-                            bitmap = frameAtTime;
-                        } else {
-                            if (bitmapCreateBitmap == null || bitmapCreateBitmap.getWidth() != this.frameWidth) {
-                                if (bitmapCreateBitmap != null) {
-                                    bitmapCreateBitmap.recycle();
-                                }
-                                bitmapCreateBitmap = Bitmap.createBitmap(this.frameWidth, this.frameHeight, Bitmap.Config.ARGB_8888);
-                            }
-                            new Canvas(bitmapCreateBitmap).drawBitmap(frameAtTime, new Rect(0, 0, frameAtTime.getWidth(), frameAtTime.getHeight()), new Rect(0, 0, this.frameWidth, this.frameHeight), (Paint) null);
-                            frameAtTime.recycle();
-                            bitmap = bitmapCreateBitmap;
-                        }
-                        synchronized (this.lock) {
-                            bitmap.getPixels(this.pixelBuffer, 0, this.frameWidth, 0, 0, this.frameWidth, this.frameHeight);
-                            while (true) {
-                                int[] iArr = this.pixelBuffer;
-                                if (i >= iArr.length) {
-                                    break;
-                                }
-                                int i2 = iArr[i];
-                                int i3 = i * 4;
-                                byte[] bArr = this.frameBuffer;
-                                bArr[i3] = (byte) ((i2 >> 16) & 255);
-                                bArr[i3 + 1] = (byte) ((i2 >> 8) & 255);
-                                bArr[i3 + 2] = (byte) (i2 & 255);
-                                bArr[i3 + 3] = -1;
-                                i++;
-                            }
-                        }
-                        if (bitmap != bitmapCreateBitmap) {
-                            bitmap.recycle();
-                        }
-                    }
-                    Thread.sleep(66L);
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "Frame error: " + e.getMessage());
-                try {
-                    Thread.sleep(100L);
-                } catch (Exception unused) {
-                }
-            }
-        }
-        if (bitmapCreateBitmap != null) {
-            bitmapCreateBitmap.recycle();
-        }
     }
 
     private void stopVideo() {
-        this.isRunning = false;
-        this.hasVideo = false;
-        Thread thread = this.frameThread;
-        if (thread != null) {
-            try {
-                thread.join(500L);
-            } catch (Exception unused) {
-            }
-            this.frameThread = null;
-        }
         MediaPlayer mediaPlayer = this.mediaPlayer;
         if (mediaPlayer != null) {
             try {
@@ -412,14 +295,6 @@ public class MainActivity extends NativeActivity {
             } catch (Exception unused2) {
             }
             this.mediaPlayer = null;
-        }
-        MediaMetadataRetriever mediaMetadataRetriever = this.retriever;
-        if (mediaMetadataRetriever != null) {
-            try {
-                mediaMetadataRetriever.release();
-            } catch (Exception unused3) {
-            }
-            this.retriever = null;
         }
     }
 
@@ -526,25 +401,6 @@ public class MainActivity extends NativeActivity {
                 Log.e(TAG, "seekAudio failed: " + e);
             }
         }
-    }
-
-    public byte[] getVideoFrame() {
-        byte[] bArr;
-        if (!this.hasVideo || this.frameBuffer == null) {
-            return null;
-        }
-        synchronized (this.lock) {
-            bArr = this.frameBuffer;
-        }
-        return bArr;
-    }
-
-    public int getVideoWidth() {
-        return this.frameWidth;
-    }
-
-    public int getVideoHeight() {
-        return this.frameHeight;
     }
 
     @Override // android.app.NativeActivity, android.app.Activity, android.view.Window.Callback

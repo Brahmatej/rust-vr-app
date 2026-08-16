@@ -4,7 +4,7 @@
 //! Includes aggressive logging to diagnose why events were missing.
 
 use glam::Quat;
-use log::{info, error, warn};
+use log::{info, error};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -190,7 +190,7 @@ impl SensorInput {
             info!("THREAD: Looper prepared correctly");
             
             // 2. Get Manager
-            let mut pt = b"com.vrapp.core\0".as_ptr();
+            let pt = b"com.vrapp.core\0".as_ptr();
             let mut manager = ndk_sys::ASensorManager_getInstanceForPackage(pt);
             if manager.is_null() {
                 manager = ndk_sys::ASensorManager_getInstance();

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+// Legacy input state, kept as a hook.
 //! Input handling module
 //!
 //! Handles PS5 DualSense controller, keyboard, and mouse input.

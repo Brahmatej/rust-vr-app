@@ -9,6 +9,7 @@ pub struct VrParams {
     pub lens_radius:        f32,
     pub lens_center_offset: f32,
     pub content_scale:      f32,
+    #[allow(dead_code)]
     pub target_scale:       f32,   // lerp target for smooth zoom
     pub gyro_enabled:       bool,
     pub recenter_flag:      bool,
@@ -170,6 +171,7 @@ pub struct FileEntry {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub enum SortBy { Name, Size, Date }
 
 pub struct FileBrowser {
@@ -366,6 +368,7 @@ impl FileBrowser {
 
 // ── Web browser state ─────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub const VIEWPORTS: [(i32, i32, &str); 4] = [
     (1920, 1080, "Wide"),
     (1080, 1920, "Tall"),
@@ -377,12 +380,14 @@ pub struct WebBrowserState {
     pub url_bar:        String,
     pub current_url:    String,
     pub pending_url:    Option<String>,
+    #[allow(dead_code)]
     pub mic_listening:  bool,
     pub go_back:        bool,
     pub go_forward:     bool,
     pub reload:         bool,
     pub new_tab:        bool,
     pub close_tab:      bool,
+    #[allow(dead_code)]
     pub viewport:       u8,
     pub pending_resize: Option<(i32, i32)>,
     pub launched:       bool,
@@ -514,9 +519,12 @@ impl VrUi {
     }
 
     pub fn show_hamburger(&mut self) { self.hamburger_visible = true; self.last_interaction = Instant::now(); }
+    #[allow(dead_code)]
     pub fn toggle_hamburger(&mut self) { self.hamburger_visible = !self.hamburger_visible; self.last_interaction = Instant::now(); }
+    #[allow(dead_code)]
     pub fn is_hamburger_visible(&self) -> bool { self.hamburger_visible }
 
+    #[allow(dead_code)]
     pub fn take_selected_file(&mut self) -> Option<PathBuf> { self.file_browser.take_selected_file() }
 
     // ── Dock navigation (D-pad driven; wired from lib.rs) ─────────────────────
@@ -944,6 +952,7 @@ impl VrUi {
     }
 }
 
+#[allow(dead_code)]
 pub fn normalise_url(input: &str) -> String {
     let s = input.trim();
     if s.starts_with("http://") || s.starts_with("https://") { return s.to_string(); }

@@ -1,3 +1,6 @@
+//! Browser interaction helpers. Several are staged for the in-progress
+//! browser-control feature and not wired up yet.
+#![allow(dead_code)]
 //! WebView / browser JNI bridge.
 //!
 //! Rust → Java: calls control methods on MainActivity (loadUrl, tap, scroll, tabs,
@@ -205,7 +208,7 @@ pub fn take_voice_result() -> Option<String> {
 /// Java pushes a captured RGBA page frame here.
 #[no_mangle]
 pub unsafe extern "C" fn Java_com_vrapp_core_MainActivity_onWebFrame(
-    mut env: jni::JNIEnv,
+    env: jni::JNIEnv,
     _class: JObject,
     width: jni::sys::jint,
     height: jni::sys::jint,

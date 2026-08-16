@@ -8,7 +8,7 @@ use log::info;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Touch, TouchPhase, WindowEvent};
+use winit::event::{TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::platform::android::EventLoopBuilderExtAndroid;
 use winit::window::{Window, WindowId};
@@ -50,8 +50,10 @@ struct VRApp {
     // NDK Video Decoder
     ndk_decoder: Option<video_ndk::NdkVideoDecoder>,
     // Evdev Gamepad Reader
+    #[allow(dead_code)]
     gamepad_reader: Option<gamepad::GamepadReader>,
     // Stereoscopic 3D layout for video: 0 = mono/2D, 1 = side-by-side, 2 = over-under.
+    #[allow(dead_code)]
     stereo_mode: u32,
 }
 
@@ -132,7 +134,7 @@ impl ApplicationHandler for VRApp {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        window_id: WindowId,
+        _window_id: WindowId,
         event: WindowEvent,
     ) {
         // Pass event to egui
@@ -192,7 +194,7 @@ impl ApplicationHandler for VRApp {
                         egui::Pos2::ZERO,
                         egui::vec2(2048.0, 2048.0),
                     ));
-                    state.egui_ctx().begin_frame(raw_input);
+                    state.egui_ctx().begin_pass(raw_input);
 
                     // Media Center thumbnails (hardware-accelerated): upload finished
                     // posters as GPU textures, then request posters for new video tiles.
@@ -213,7 +215,7 @@ impl ApplicationHandler for VRApp {
 
                     ui.render(state.egui_ctx(), self.renderer.as_ref().map(|r| r.vr_mode).unwrap_or(false));
                     
-                    let output = state.egui_ctx().end_frame();
+                    let output = state.egui_ctx().end_pass();
                     
                     state.handle_platform_output(window, output.platform_output.clone());
                     
@@ -537,9 +539,6 @@ impl ApplicationHandler for VRApp {
                                 renderer.update_video_texture(&y_data, &uv_data, width, height);
                             }
                         }
-                    } else if let Some(frame) = video::VideoManager::get_video_frame(&self.app) {
-                        // Fallback path for Java-based video (not used with NDK decoder)
-                        let _ = frame; // NDK path is preferred
                     }
 
                     // Browser: when in web mode, show the live page on the screen.
@@ -572,7 +571,7 @@ impl ApplicationHandler for VRApp {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 // Map gamepad button events to GamepadState
-                use winit::keyboard::{KeyCode, PhysicalKey};
+                use winit::keyboard::PhysicalKey;
                 use winit::event::ElementState;
                 
                 let pressed = event.state == ElementState::Pressed;
