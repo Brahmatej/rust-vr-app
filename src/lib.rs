@@ -49,6 +49,8 @@ struct VRApp {
     initial_content_scale: f32,
     // NDK Video Decoder
     ndk_decoder: Option<video_ndk::NdkVideoDecoder>,
+    /// Previous R2 analog value, for edge-detecting the browser click.
+    prev_r2: f32,
     // Evdev Gamepad Reader
     #[allow(dead_code)]
     gamepad_reader: Option<gamepad::GamepadReader>,
@@ -71,6 +73,7 @@ impl VRApp {
             initial_pinch_distance: None,
             initial_content_scale: 1.0,
             ndk_decoder: None,
+            prev_r2: 0.0,
             gamepad_reader: Some(gamepad::GamepadReader::new()),
             stereo_mode: 0,
         }
@@ -198,7 +201,7 @@ impl ApplicationHandler for VRApp {
 
                     // Media Center thumbnails (hardware-accelerated): upload finished
                     // posters as GPU textures, then request posters for new video tiles.
-                    if ui.file_browser.visible {
+                    if ui.media_visible() {
                         let ctx = state.egui_ctx();
                         for t in thumbs::drain() {
                             let img = egui::ColorImage::from_rgba_unmultiplied(
@@ -222,53 +225,82 @@ impl ApplicationHandler for VRApp {
                     full_output = Some(output);
                     ctx_clone = Some(state.egui_ctx().clone());
                     
-                    // Apply UI Params
-                    // 1. Recenter
-                    if ui.params.recenter_flag {
-                         if let Some(sensors) = &self.sensors {
-                            sensors.recenter();
-                         }
-                         ui.params.recenter_flag = false; // Reset flag
-                    }
-                    
-                    // 2. Gyro Toggle (handled in update below)
-                    // 3. Distortion (passed to renderer later)
-
-                    // 4. Check Selection
-                    if ui.params.select_video_flag {
-                         info!("UI: Select Video Requested");
-                         ui.params.select_video_flag = false;
-                         video::VideoManager::pick_video(&self.app);
-                    }
-                    
-                    // 5. Check Exit Request
-                    if ui.params.vr_exit_requested {
-                        if let Some(renderer) = &mut self.renderer {
-                             renderer.vr_mode = false;
-                             info!("Exited VR Mode via Menu");
+                    // ── Browser tab model: pull Java's view a few times a second ──
+                    //
+                    // OWNERSHIP: Gecko (Java) owns the real sessions and is the sole
+                    // authority on tab count / active tab / per-tab url, title and
+                    // aspect. Rust keeps a read-only MIRROR, refreshed only here, and
+                    // never mutates it directly — every change goes out as an intent
+                    // and comes back on the next sync.
+                    if ui.params.web_mode {
+                        ui.web_browser.info_tick = ui.web_browser.info_tick.wrapping_add(1);
+                        if ui.web_browser.info_tick % 12 == 0 {
+                            if let Some(snap) = webview::tab_snapshot(&self.app) {
+                                ui.sync_tabs(snap);
+                            }
                         }
-                        ui.params.vr_exit_requested = false; // Reset flag
                     }
 
-                    // 5b. Browser: engine activation, URL load, and toolbar nav flags.
-                    if let Some(engine) = ui.params.pending_engine.take() {
-                        webview::set_engine(&self.app, engine);
+                    // ── Drain one-shot intents (see ui::Intent) ───────────────
+                    for intent in ui.drain_intents() {
+                        use ui::Intent as I;
+                        match intent {
+                            I::Recenter => {
+                                if let Some(sensors) = &self.sensors { sensors.recenter(); }
+                            }
+                            I::ExitVr => {
+                                if let Some(renderer) = &mut self.renderer {
+                                    renderer.vr_mode = false;
+                                    info!("Exited VR Mode via Menu");
+                                }
+                            }
+                            I::PlayFile(path) => {
+                                let path_str = path.to_string_lossy().to_string();
+                                info!("Media Center: play {}", path_str);
+                                // The fragment shader draws the browser texture in
+                                // preference to video, so web mode has to go.
+                                if ui.params.web_mode {
+                                    ui.params.web_mode = false;
+                                    ui.menu_state = ui::MenuState::Main;
+                                }
+                                if let Some(decoder) = &mut self.ndk_decoder { decoder.stop(); }
+                                video::start_audio_from_path(&self.app, &path_str);
+                                if let Ok(file) = std::fs::File::open(&path) {
+                                    use std::os::unix::io::AsRawFd;
+                                    let fd = file.as_raw_fd();
+                                    let mut decoder = video_ndk::NdkVideoDecoder::new();
+                                    if decoder.start_from_fd(fd).is_ok() {
+                                        self.ndk_decoder = Some(decoder);
+                                        info!("Started playback: {}", path_str);
+                                    }
+                                    // The decoder owns the FD for its lifetime.
+                                    std::mem::forget(file);
+                                }
+                            }
+                            I::TogglePlayPause => toggle_playback(&self.app, &self.ndk_decoder),
+                            I::Seek(us) => seek_relative(&self.app, &self.ndk_decoder, us),
+                            I::SetEngine(e)    => webview::set_engine(&self.app, e),
+                            I::Navigate(url)   => {
+                                webview::load_url(&self.app, &url);
+                                ui.web_browser.current_url = url;
+                            }
+                            I::BrowserBack     => webview::go_back(&self.app),
+                            I::BrowserForward  => webview::go_forward(&self.app),
+                            I::BrowserReload   => webview::reload(&self.app),
+                            I::NewTab          => webview::new_tab(&self.app),
+                            I::CloseTabAt(i)   => webview::close_tab_at(&self.app, i as i32),
+                            I::SelectTab(i)    => webview::select_tab(&self.app, i as i32),
+                            I::SwitchTab(d)    => webview::switch_tab(&self.app, d),
+                            I::CycleAspect     => webview::cycle_aspect(&self.app),
+                            I::Tap(x, y)       => webview::tap(&self.app, x, y),
+                            I::Scroll(dx, dy, x, y) => webview::inject_scroll(&self.app, dx, dy, x, y),
+                            I::TypeText(t)     => webview::type_text(&self.app, &t),
+                            I::SubmitEnter     => webview::submit_enter(&self.app),
+                        }
                     }
-                    if let Some(url) = ui.web_browser.pending_url.take() {
-                        webview::load_url(&self.app, &url);
-                        ui.web_browser.current_url = url;
-                    }
-                    if ui.web_browser.go_back    { webview::go_back(&self.app);    ui.web_browser.go_back = false; }
-                    if ui.web_browser.go_forward { webview::go_forward(&self.app); ui.web_browser.go_forward = false; }
-                    if ui.web_browser.reload     { webview::reload(&self.app);     ui.web_browser.reload = false; }
-                    if ui.web_browser.new_tab    { webview::new_tab(&self.app);    ui.web_browser.new_tab = false; }
-                    if ui.web_browser.close_tab  { webview::close_tab(&self.app);  ui.web_browser.close_tab = false; }
-                    if let Some((w, h)) = ui.web_browser.pending_resize.take() {
-                        webview::resize(&self.app, w, h);
-                    }
-                    
-                    // 5b. Publish the audio clock so the video decoder can pace
-                    // against it. This is what actually keeps A/V in sync.
+
+                    // Publish the audio clock so the video decoder can pace against
+                    // it. This is what actually keeps A/V in sync.
                     if let Some(decoder) = &self.ndk_decoder {
                         if decoder.is_running() && !decoder.is_paused() {
                             let ms = video::audio_position_ms(&self.app);
@@ -278,214 +310,145 @@ impl ApplicationHandler for VRApp {
                         }
                     }
 
-                    // 6. Handle Playback Controls (from UI buttons)
-                    if ui.params.toggle_play_pause {
-                        toggle_playback(&self.app, &self.ndk_decoder);
-                        ui.params.toggle_play_pause = false;
-                    }
+                    // ── Gamepad (polled once per frame) ───────────────────────
+                    let gp = gamepad::poll_actions();
 
-                    if ui.params.seek_forward_flag {
-                        seek_relative(&self.app, &self.ndk_decoder, 10_000_000);
-                        ui.params.seek_forward_flag = false;
-                    }
+                    // R2 is an ANALOG axis on a DualSense; edge-detect it so a held
+                    // trigger clicks once rather than every frame.
+                    let r2_edge = gp.r2_trigger > 0.55 && self.prev_r2 <= 0.55;
+                    self.prev_r2 = gp.r2_trigger;
 
-                    if ui.params.seek_backward_flag {
-                        seek_relative(&self.app, &self.ndk_decoder, -10_000_000);
-                        ui.params.seek_backward_flag = false;
-                    }
-                    
-                    // 7. Handle Gamepad Actions (poll once per frame)
-                    let gp_actions = gamepad::poll_actions();
-                    
-                    // ── Always-active controls ──────────────────────────────
-                    // Recenter (L3)
-                    if gp_actions.reset_view {
+                    // Always-active, focus-independent.
+                    if gp.reset_view {
                         if let Some(sensors) = &self.sensors { sensors.recenter(); }
                     }
-                    // VR/2D toggle (R3)
-                    if gp_actions.toggle_vr_mode {
+                    if gp.toggle_vr_mode {
                         if let Some(renderer) = &mut self.renderer {
                             renderer.vr_mode = !renderer.vr_mode;
                         }
                     }
 
-                    // Typed text was previously stranded in the keyboard - route a
-                    // submitted string into the browser as a URL/search navigation.
-                    if let Some(text) = ui.keyboard.take_commit() {
-                        if !text.trim().is_empty() {
-                            let target = if text.contains('.') && !text.contains(' ') {
-                                if text.starts_with("http") { text.clone() }
-                                else { format!("https://{}", text) }
-                            } else {
-                                format!("https://duckduckgo.com/?q={}", text.replace(' ', "+"))
-                            };
-                            info!("Keyboard commit -> navigate: {}", target);
-                            ui.web_browser.url_bar = target.clone();
-                            ui.web_browser.pending_url = Some(target);
-                            if !ui.params.web_mode {
-                                ui.params.web_mode = true;
-                                ui.params.pending_engine = Some(1);
+                    // ── Modal dispatch on the focus state machine ─────────────
+                    // Exactly one arm runs, so no two surfaces can claim a button.
+                    match ui.focus() {
+                        ui::Focus::Keyboard => {
+                            // D-pad picks a key, X types it, O backspaces,
+                            // Options submits, △ dismisses.
+                            if gp.nav_left  { ui.keyboard.move_left(); }
+                            if gp.nav_right { ui.keyboard.move_right(); }
+                            if gp.nav_up    { ui.keyboard.move_up(); }
+                            if gp.nav_down  { ui.keyboard.move_down(); }
+                            if gp.play_pause || gp.confirm { ui.keyboard.press(); }
+                            if gp.back          { ui.keyboard.backspace(); }
+                            if gp.open_settings { ui.keyboard_commit(); }
+                            if gp.toggle_ui     { let b = ui.base_focus(); ui.set_focus(b); }
+                        }
+                        ui::Focus::MediaCenter => {
+                            // Left-stick coverflow sweep + D-pad; X open; O up a level.
+                            ui.file_browser.handle_stick(gp.left_stick_x);
+                            if gp.nav_up   || gp.nav_left  { ui.file_browser.move_up(); }
+                            if gp.nav_down || gp.nav_right { ui.file_browser.move_down(); }
+                            if gp.play_pause || gp.confirm { ui.media_select(); }
+                            if gp.back { ui.file_browser.go_back(); }
+                            // Create closes it again (it opened it), Options swaps to the dock.
+                            if gp.open_file_picker { let b = ui.base_focus(); ui.set_focus(b); }
+                            if gp.open_settings    { ui.set_focus(ui::Focus::Dock); }
+                            if gp.toggle_ui        { ui.set_focus(ui::Focus::Keyboard); }
+                        }
+                        ui::Focus::Dock => {
+                            // D-pad left/right move the highlight, X activates, Options/O close.
+                            if gp.nav_left  { ui.dock_move_left(); }
+                            if gp.nav_right { ui.dock_move_right(); }
+                            if gp.play_pause || gp.confirm { ui.dock_activate(); }
+                            if gp.back || gp.open_settings { let b = ui.base_focus(); ui.set_focus(b); }
+                            if gp.toggle_ui { ui.set_focus(ui::Focus::Keyboard); }
+                        }
+                        ui::Focus::TabOverview => {
+                            if gp.nav_left  { ui.web_browser.overview_move(-1); }
+                            if gp.nav_right { ui.web_browser.overview_move(1); }
+                            if gp.nav_up    { ui.web_browser.overview_move(-2); }
+                            if gp.nav_down  { ui.web_browser.overview_move(2); }
+                            if gp.play_pause {
+                                let i = ui.web_browser.overview_sel;
+                                ui.push(ui::Intent::SelectTab(i));
+                                ui.set_focus(ui::Focus::Browser);
+                            }
+                            if gp.back {
+                                let i = ui.web_browser.overview_sel;
+                                ui.push(ui::Intent::CloseTabAt(i));
+                            }
+                            if gp.confirm || gp.toggle_ui { ui.set_focus(ui::Focus::Browser); }
+                            if gp.open_settings { ui.set_focus(ui::Focus::Dock); }
+                        }
+                        ui::Focus::Browser => {
+                            // Stick cursor: RIGHT stick moves it, LEFT stick scrolls.
+                            ui.web_browser.move_cursor(gp.right_stick_x, gp.right_stick_y);
+                            ui.browser_scroll(gp.left_stick_x, gp.left_stick_y);
+                            if r2_edge || gp.play_pause { ui.browser_click(); }
+                            if gp.seek_back    { ui.push(ui::Intent::SwitchTab(-1)); }
+                            if gp.seek_forward { ui.push(ui::Intent::SwitchTab(1)); }
+                            if gp.back         { ui.push(ui::Intent::BrowserBack); }
+                            if gp.confirm {
+                                ui.web_browser.overview_sel = ui.web_browser.active_tab;
+                                ui.set_focus(ui::Focus::TabOverview);
+                            }
+                            if gp.toggle_ui     { ui.toggle_focus(ui::Focus::Keyboard); }
+                            if gp.open_settings { ui.toggle_focus(ui::Focus::Dock); }
+                            if gp.open_file_picker {
+                                ui.file_browser.refresh_entries();
+                                ui.toggle_focus(ui::Focus::MediaCenter);
+                            }
+                            // Per-tab viewport shape (the video-mode stereo binding
+                            // lives on the same key but only in Focus::Video).
+                            if gp.nav_right { ui.push(ui::Intent::CycleAspect); }
+                            if gp.nav_left  { ui.push(ui::Intent::NewTab); }
+                            // Global geometry / head-tracking bindings stay live.
+                            if gp.nav_up   { cycle_projection(ui); }
+                            if gp.nav_down {
+                                sensors::cycle_head_mode();
+                                info!("Head tracking mode -> {}", sensors::head_mode_label());
+                            }
+                        }
+                        ui::Focus::Video => {
+                            // No panel: Options opens the dock, Create the Media Center,
+                            // △ the keyboard, X play/pause, L1/R1 seek, D-pad L/R 3D layout.
+                            if gp.open_settings { ui.toggle_focus(ui::Focus::Dock); }
+                            if gp.toggle_ui     { ui.toggle_focus(ui::Focus::Keyboard); }
+                            if gp.open_file_picker {
+                                ui.file_browser.refresh_entries();
+                                ui.toggle_focus(ui::Focus::MediaCenter);
+                            }
+                            if gp.play_pause   { toggle_playback(&self.app, &self.ndk_decoder); }
+                            if gp.seek_back    { seek_relative(&self.app, &self.ndk_decoder, -10_000_000); }
+                            if gp.seek_forward { seek_relative(&self.app, &self.ndk_decoder, 10_000_000); }
+                            if gp.nav_right {
+                                ui.params.stereo_mode = (ui.params.stereo_mode + 1) % ui::STEREO_MODES;
+                                info!("3D -> {}", ui::stereo_label(ui.params.stereo_mode));
+                            }
+                            if gp.nav_left {
+                                ui.params.stereo_mode =
+                                    (ui.params.stereo_mode + ui::STEREO_MODES - 1) % ui::STEREO_MODES;
+                                info!("3D -> {}", ui::stereo_label(ui.params.stereo_mode));
+                            }
+                            if gp.nav_up   { cycle_projection(ui); }
+                            if gp.nav_down {
+                                sensors::cycle_head_mode();
+                                info!("Head tracking mode -> {}", sensors::head_mode_label());
                             }
                         }
                     }
 
-                    // ── Menu-gated controls ─────────────────────────────────
-                    // Every opener is a TOGGLE: pressing the same button again closes
-                    // what it opened, so you can never get stuck in a panel.
-                    //   △        -> virtual keyboard
-                    //   Options  -> dock
-                    //   Create   -> Media Center
-                    if ui.keyboard.visible {
-                        // Keyboard: D-pad picks a key, X types it, O backspaces,
-                        // Options submits, △ dismisses.
-                        if gp_actions.nav_left  { ui.keyboard.move_left(); }
-                        if gp_actions.nav_right { ui.keyboard.move_right(); }
-                        if gp_actions.nav_up    { ui.keyboard.move_up(); }
-                        if gp_actions.nav_down  { ui.keyboard.move_down(); }
-                        if gp_actions.play_pause || gp_actions.confirm { ui.keyboard.press(); }
-                        if gp_actions.back          { ui.keyboard.backspace(); }
-                        if gp_actions.open_settings { ui.keyboard.submit(); }
-                        if gp_actions.toggle_ui     { ui.keyboard.visible = false; }
-                    } else if ui.file_browser.visible {
-                        // Media Center: left-stick coverflow sweep + D-pad; X open; O up.
-                        ui.file_browser.handle_stick(gp_actions.left_stick_x);
-                        if gp_actions.nav_up   || gp_actions.nav_left  { ui.file_browser.move_up(); }
-                        if gp_actions.nav_down || gp_actions.nav_right { ui.file_browser.move_down(); }
-                        if gp_actions.play_pause || gp_actions.confirm { ui.file_browser.select_current(); }
-                        if gp_actions.back { ui.file_browser.go_back(); }
-                        // Create closes it again (it's what opened it), Options swaps to the dock.
-                        if gp_actions.open_file_picker { ui.file_browser.visible = false; }
-                        if gp_actions.open_settings {
-                            ui.file_browser.visible = false;
-                            ui.main_menu_visible = true;
-                        }
-                        if gp_actions.toggle_ui { ui.keyboard.visible = true; }
-                    } else if ui.main_menu_visible {
-                        // Dock: D-pad left/right move highlight, X activate, Options/O close.
-                        if gp_actions.nav_left  { ui.dock_move_left(); }
-                        if gp_actions.nav_right { ui.dock_move_right(); }
-                        if gp_actions.play_pause || gp_actions.confirm { ui.dock_activate(); }
-                        if gp_actions.back || gp_actions.open_settings {
-                            ui.main_menu_visible = false;
-                        }
-                        if gp_actions.toggle_ui { ui.keyboard.visible = true; }
-                    } else {
-                        // No menu: Options opens dock, Create opens Media Center,
-                        // △ opens the keyboard, X play/pause, L1/R1 seek,
-                        // D-pad L/R cycle the 3D layout.
-                        if gp_actions.open_settings { ui.main_menu_visible = true; }
-                        if gp_actions.toggle_ui     { ui.keyboard.visible = true; }
-                        if gp_actions.open_file_picker {
-                            ui.file_browser.visible = true;
-                            ui.file_browser.refresh_entries();
-                        }
-                        if gp_actions.play_pause {
-                            toggle_playback(&self.app, &self.ndk_decoder);
-                        }
-                        if gp_actions.seek_back {
-                            seek_relative(&self.app, &self.ndk_decoder, -10_000_000);
-                        }
-                        if gp_actions.seek_forward {
-                            seek_relative(&self.app, &self.ndk_decoder, 10_000_000);
-                        }
-                        if gp_actions.nav_right {
-                            ui.params.stereo_mode = (ui.params.stereo_mode + 1) % 3;
-                            info!("3D -> {}", ui::stereo_label(ui.params.stereo_mode));
-                        }
-                        if gp_actions.nav_left {
-                            ui.params.stereo_mode = (ui.params.stereo_mode + 2) % 3;
-                            info!("3D -> {}", ui::stereo_label(ui.params.stereo_mode));
-                        }
-                        // D-pad up cycles the screen geometry: flat -> 180 -> 360 -> vertical.
-                        if gp_actions.nav_up {
-                            ui.params.projection_mode =
-                                (ui.params.projection_mode + 1) % ui::PROJECTION_MODES;
-                            // Entering a dome from mono: VR180/VR360 footage is
-                            // overwhelmingly side-by-side stereo, and the per-eye split
-                            // lives in stereo_mode (independent of projection), so
-                            // switching to a dome while still in 2D showed the whole
-                            // packed frame to both eyes instead of half each. Default to
-                            // SBS; D-pad left/right still overrides.
-                            let dome = matches!(ui.params.projection_mode, 1 | 2);
-                            if dome && ui.params.stereo_mode == 0 {
-                                ui.params.stereo_mode = 1;
-                                info!("Dome: auto-enabling side-by-side");
-                            }
-                            info!("Projection -> {} ({})",
-                                ui::projection_label(ui.params.projection_mode),
-                                ui::stereo_label(ui.params.stereo_mode));
-                        }
-                        // D-pad down cycles the head-tracking basis (see sensors.rs).
-                        // The active mode shows in the dock subtitle.
-                        if gp_actions.nav_down {
-                            sensors::cycle_head_mode();
-                            info!("Head tracking mode -> {}", sensors::head_mode_label());
-                        }
-                    }
-
-                    // Zoom controls (L2/R2 - always active). DualSense over Bluetooth
-                    // reports triggers as ANALOG AXES, not digital key presses, so this
-                    // reads r2_trigger/l2_trigger (0.0-1.0) with a small deadzone, scaled
-                    // by how far the trigger is pressed - not the (rarely-firing) digital
-                    // btn_l2/btn_r2 booleans.
+                    // Zoom (L2/R2 analog). Suppressed while the browser has focus —
+                    // there R2 is the click button.
                     const TRIGGER_DEADZONE: f32 = 0.08;
                     const ZOOM_SPEED: f32 = 0.05;
-                    if gp_actions.r2_trigger > TRIGGER_DEADZONE {
+                    if ui.focus() != ui::Focus::Browser && gp.r2_trigger > TRIGGER_DEADZONE {
                         ui.params.content_scale =
-                            (ui.params.content_scale + ZOOM_SPEED * gp_actions.r2_trigger).min(ZOOM_MAX);
-                    } else if gp_actions.zoom_in {
-                        ui.params.content_scale = (ui.params.content_scale + 0.02).min(ZOOM_MAX);
+                            (ui.params.content_scale + ZOOM_SPEED * gp.r2_trigger).min(ZOOM_MAX);
                     }
-                    if gp_actions.l2_trigger > TRIGGER_DEADZONE {
+                    if gp.l2_trigger > TRIGGER_DEADZONE {
                         ui.params.content_scale =
-                            (ui.params.content_scale - ZOOM_SPEED * gp_actions.l2_trigger).max(ZOOM_MIN);
-                    } else if gp_actions.zoom_out {
-                        ui.params.content_scale = (ui.params.content_scale - 0.02).max(ZOOM_MIN);
-                    }
-                    
-                    // D-pad volume controls (when D-pad events work)
-                    // Left = volume down, Right = volume up
-                    // Note: D-pad on PS5 sends MotionEvents, need to handle in nav actions
-                    
-                    // Check if a file was selected from browser
-                    if let Some(selected_path) = ui.file_browser.take_selected_file() {
-                        let path_str = selected_path.to_string_lossy().to_string();
-                        info!("File Browser: Selected {}", path_str);
-
-                        // Leave web mode: the fragment shader draws the browser texture
-                        // in preference to video (is_web is checked first), so starting
-                        // playback while web_mode was still set played the audio/video
-                        // but kept the browser page on screen.
-                        if ui.params.web_mode {
-                            info!("Leaving web mode for video playback");
-                            ui.params.web_mode = false;
-                            ui.menu_state = ui::MenuState::Main;
-                        }
-                        // Close the Media Center so the video it just started is visible.
-                        ui.file_browser.visible = false;
-
-                        // Start playing the selected video file
-                        if let Some(decoder) = &mut self.ndk_decoder {
-                            decoder.stop();
-                        }
-                        
-                        // Start audio playback via Java MediaPlayer
-                        video::start_audio_from_path(&self.app, &path_str);
-                        
-                        // Open the file and get FD for video decoder
-                        if let Ok(file) = std::fs::File::open(&selected_path) {
-                            use std::os::unix::io::AsRawFd;
-                            let fd = file.as_raw_fd();
-                            
-                            // Create new decoder with file
-                            let mut decoder = video_ndk::NdkVideoDecoder::new();
-                            if decoder.start_from_fd(fd).is_ok() {
-                                self.ndk_decoder = Some(decoder);
-                                info!("Started playback: {}", path_str);
-                            }
-                            // Keep file open (leak it for now - decoder needs the FD)
-                            std::mem::forget(file);
-                        }
+                            (ui.params.content_scale - ZOOM_SPEED * gp.l2_trigger).max(ZOOM_MIN);
                     }
                 }
 
@@ -760,6 +723,24 @@ fn android_main(app: AndroidApp) {
     
     let mut vr_app = VRApp::new(app);
     event_loop.run_app(&mut vr_app).expect("Event loop failed");
+}
+
+/// D-pad up: cycle the screen geometry (flat → 180 → 360 → vertical).
+///
+/// Entering a dome from mono: VR180/VR360 footage is overwhelmingly side-by-side
+/// stereo and the per-eye split lives in `stereo_mode` (independent of projection),
+/// so switching to a dome while still in 2D showed the whole packed frame to both
+/// eyes. Default to SBS; D-pad left/right still overrides.
+fn cycle_projection(ui: &mut ui::VrUi) {
+    ui.params.projection_mode = (ui.params.projection_mode + 1) % ui::PROJECTION_MODES;
+    let dome = matches!(ui.params.projection_mode, 1 | 2);
+    if dome && ui.params.stereo_mode == 0 {
+        ui.params.stereo_mode = 1;
+        info!("Dome: auto-enabling side-by-side");
+    }
+    info!("Projection -> {} ({})",
+        ui::projection_label(ui.params.projection_mode),
+        ui::stereo_label(ui.params.stereo_mode));
 }
 
 /// Toggle play/pause for BOTH pipelines.

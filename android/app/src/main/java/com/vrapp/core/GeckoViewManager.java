@@ -14,9 +14,12 @@ import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 
+import org.mozilla.geckoview.ContentBlocking;
 import org.mozilla.geckoview.GeckoDisplay;
+import org.mozilla.geckoview.GeckoResult;
 import org.mozilla.geckoview.GeckoRuntime;
 import org.mozilla.geckoview.GeckoSession;
+import org.mozilla.geckoview.GeckoSessionSettings;
 
 import java.nio.ByteBuffer;
 
@@ -24,13 +27,18 @@ import java.nio.ByteBuffer;
  * Firefox (GeckoView) engine rendering into ImageReader Surfaces.
  *
  * Multi-tab model: every tab is a GeckoSession on the SAME GeckoRuntime, so all
- * tabs share one profile → shared cookies / logins. CRUCIALLY each tab owns its
- * OWN GeckoDisplay + ImageReader/Surface, acquired once at creation and never
- * swapped. Switching tabs only changes which tab pushes frames to the renderer.
+ * tabs share one PERSISTENT profile → shared cookies / logins that survive
+ * process death. CRUCIALLY each tab owns its OWN GeckoDisplay + ImageReader/
+ * Surface, acquired once at creation and never swapped. Switching tabs only
+ * changes which tab pushes frames to the renderer.
  *
  * (An earlier design shared one display and re-acquired it on every switch — that
  * tears down/rebuilds WebRender's compositor mid-frame and segfaults the Gecko
  * thread with "webrender error 3". Per-tab displays avoid all of that.)
+ *
+ * Each tab also carries its OWN aspect ratio (viewport shape), cycled with D-pad
+ * right from the VR side; the Rust renderer derives the browser plane's shape
+ * from the pushed frame size, so the two always agree.
  */
 public class GeckoViewManager {
     private static final String TAG      = "VRAppJava";
@@ -39,8 +47,19 @@ public class GeckoViewManager {
     private static final int    MAX_TABS = 4;   // each tab = its own compositor (heavy)
     private static final String HOME_URL = "https://www.google.com";
 
+    /** Per-tab viewport shapes, cycled with D-pad right. */
+    private static final int[][] ASPECTS = {
+        {1920, 1080},   // 16:9  widescreen
+        {1440, 1080},   // 4:3   classic
+        {2160,  926},   // 21:9  ultrawide
+        {1200, 1200},   // 1:1   square
+        {1080, 1920},   // 9:16  tall / phone layout
+    };
+    private static final String[] ASPECT_LABELS = { "16:9", "4:3", "21:9", "1:1", "9:16" };
+
     private final Context context;
     private final Handler mainHandler;
+    private final SessionStore store;
 
     private GeckoRuntime runtime;
     private HandlerThread readerThread;
@@ -53,8 +72,12 @@ public class GeckoViewManager {
         GeckoDisplay display;
         ImageReader  reader;
         String  url;
+        String  title = "";
+        int     progress = 100;
         boolean loaded = false;
         boolean inFullscreen = false;
+        boolean textFocused = false;
+        int     aspect = 0;
         int     w = WEB_W, h = WEB_H;
     }
 
@@ -68,6 +91,7 @@ public class GeckoViewManager {
     public GeckoViewManager(Context context) {
         this.context     = context;
         this.mainHandler = new Handler(Looper.getMainLooper());
+        this.store       = new SessionStore(context);
     }
 
     private Tab active() {
@@ -82,26 +106,64 @@ public class GeckoViewManager {
         readerThread.start();
         readerHandler = new Handler(readerThread.getLooper());
 
+        java.io.File profile = SessionStore.geckoProfileDir(context);
+        if (!profile.exists() && !profile.mkdirs()) {
+            Log.w(TAG, "Could not create Gecko profile dir " + profile);
+        }
+
+        // Cookies and site storage must actually stick, otherwise a Google login
+        // evaporates on every restart. ACCEPT_ALL + ETP off is the most permissive
+        // (and most login-compatible) configuration.
+        ContentBlocking.Settings cb = new ContentBlocking.Settings.Builder()
+            .cookieBehavior(ContentBlocking.CookieBehavior.ACCEPT_ALL)
+            .antiTracking(ContentBlocking.AntiTracking.NONE)
+            .enhancedTrackingProtectionLevel(ContentBlocking.EtpLevel.NONE)
+            .cookiePurging(false)
+            .build();
+
         org.mozilla.geckoview.GeckoRuntimeSettings settings =
             new org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
                 .screenSizeOverride(WEB_W, WEB_H)
+                // -profile pins Gecko to a stable directory we control (and can back
+                // up); without it the profile lives wherever Gecko decides and is not
+                // guaranteed to survive a reinstall.
+                .arguments(new String[]{ "-profile", profile.getAbsolutePath() })
+                .contentBlocking(cb)
+                .loginAutofillEnabled(true)
+                .aboutConfigEnabled(true)
+                .javaScriptEnabled(true)
                 .build();
-        runtime = GeckoRuntime.create(context, settings);
+        try {
+            runtime = GeckoRuntime.create(context, settings);
+        } catch (Throwable t) {
+            // Never let a profile/argument problem take the whole browser down —
+            // fall back to a default runtime and log loudly.
+            Log.e(TAG, "GeckoRuntime.create with -profile failed, retrying default: " + t);
+            runtime = GeckoRuntime.create(context,
+                new org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
+                    .screenSizeOverride(WEB_W, WEB_H)
+                    .contentBlocking(cb)
+                    .build());
+        }
         imeView = new View(context);
 
         running = true;
 
-        java.util.List<String> saved = loadTabState();
+        java.util.List<SessionStore.TabRecord> saved = store.loadTabs();
         if (saved.isEmpty()) {
-            createTab(HOME_URL);
+            createTab(HOME_URL, null, 0);
         } else {
-            for (String u : saved) createTab(u);
+            for (SessionStore.TabRecord r : saved) {
+                Tab t = createTab(r.url, null, r.aspect);
+                t.title = r.title == null ? "" : r.title;
+            }
         }
-        activeTab = Math.max(0, Math.min(loadActiveIndex(), tabs.size() - 1));
+        activeTab = Math.max(0, Math.min(store.loadActiveTab(), tabs.size() - 1));
         activateTab(activeTab);
 
         Log.i(TAG, "GeckoViewManager initialised " + WEB_W + "x" + WEB_H
-            + " with " + tabs.size() + " tab(s), active " + activeTab);
+            + " with " + tabs.size() + " tab(s), active " + activeTab
+            + ", profile " + profile.getAbsolutePath());
     }
 
     // ── Tabs ────────────────────────────────────────────────────────────────────
@@ -111,37 +173,154 @@ public class GeckoViewManager {
         return url.trim();
     }
 
-    /** Build a tab with its own session + display pipeline (no load yet). */
-    private Tab createTab(String url) {
+    private GeckoSessionSettings sessionSettings() {
+        // Desktop UA + desktop viewport: the panel is 1920-wide-class, and Google's
+        // sign-in flow is happiest with a plain desktop Firefox identity. GeckoView is
+        // real Firefox, so no "unsupported browser" interstitial.
+        return new GeckoSessionSettings.Builder()
+            .usePrivateMode(false)
+            .useTrackingProtection(false)
+            .allowJavascript(true)
+            .suspendMediaWhenInactive(false)
+            .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP)
+            .viewportMode(GeckoSessionSettings.VIEWPORT_MODE_DESKTOP)
+            .build();
+    }
+
+    /**
+     * Build a tab with its own session + display pipeline.
+     *
+     * `existing` is non-null only on the popup path (`onNewSession`), where Gecko
+     * hands us an UNOPENED session that it opens itself — we must not open it.
+     */
+    private Tab createTab(String url, GeckoSession existing, int aspectIdx) {
         final Tab tab = new Tab();
-        tab.url = sanitize(url);
+        tab.url    = sanitize(url);
+        tab.aspect = (aspectIdx >= 0 && aspectIdx < ASPECTS.length) ? aspectIdx : 0;
+        tab.w = ASPECTS[tab.aspect][0];
+        tab.h = ASPECTS[tab.aspect][1];
 
         // Own capture pipeline (RGBX_8888 = Gecko compositor format).
-        tab.reader = ImageReader.newInstance(WEB_W, WEB_H, PixelFormat.RGBX_8888, 3);
+        tab.reader = ImageReader.newInstance(tab.w, tab.h, PixelFormat.RGBX_8888, 3);
         tab.reader.setOnImageAvailableListener(r -> onImageAvailable(r, tab), readerHandler);
 
-        tab.session = new GeckoSession();
+        tab.session = (existing != null) ? existing : new GeckoSession(sessionSettings());
+        attachDelegates(tab);
+        if (existing == null) {
+            tab.session.open(runtime);
+        } else {
+            // Gecko opens and navigates it for us.
+            tab.loaded = true;
+        }
+
+        // Own display, bound once to this tab's surface and kept for its lifetime.
+        try {
+            tab.display = tab.session.acquireDisplay();
+            tab.display.surfaceChanged(
+                new GeckoDisplay.SurfaceInfo.Builder(tab.reader.getSurface())
+                    .size(tab.w, tab.h).build());
+        } catch (Exception e) {
+            // Popup sessions are not open yet at this point on some paths; retry once
+            // the runtime has taken ownership.
+            Log.w(TAG, "acquireDisplay deferred: " + e);
+            mainHandler.postDelayed(() -> {
+                try {
+                    if (tab.session == null || tab.reader == null) return;
+                    tab.display = tab.session.acquireDisplay();
+                    tab.display.surfaceChanged(
+                        new GeckoDisplay.SurfaceInfo.Builder(tab.reader.getSurface())
+                            .size(tab.w, tab.h).build());
+                    Log.i(TAG, "acquireDisplay (deferred) ok");
+                } catch (Exception e2) {
+                    Log.e(TAG, "acquireDisplay (deferred) failed: " + e2);
+                }
+            }, 300);
+        }
+
+        tabs.add(tab);
+        return tab;
+    }
+
+    private void attachDelegates(final Tab tab) {
         tab.session.setContentDelegate(new GeckoSession.ContentDelegate() {
             @Override public void onFullScreen(GeckoSession sess, boolean fs) {
                 tab.inFullscreen = fs;
                 Log.i(TAG, "Gecko fullscreen video: " + fs);
             }
+            @Override public void onTitleChange(GeckoSession sess, String title) {
+                tab.title = (title != null) ? title : "";
+            }
+            @Override public void onCloseRequest(GeckoSession sess) {
+                // window.close() from a popup: drop that tab.
+                mainHandler.post(() -> closeTabObject(tab));
+            }
         });
         tab.session.setProgressDelegate(new GeckoSession.ProgressDelegate() {
             @Override public void onPageStart(GeckoSession sess, String locUrl) {
                 if (locUrl != null) tab.url = locUrl;
+                tab.progress = 0;
+            }
+            @Override public void onPageStop(GeckoSession sess, boolean ok) {
+                tab.progress = 100;
+            }
+            @Override public void onProgressChange(GeckoSession sess, int p) {
+                tab.progress = p;
             }
         });
-        tab.session.open(runtime);
-
-        // Own display, bound once to this tab's surface and kept for its lifetime.
-        tab.display = tab.session.acquireDisplay();
-        tab.display.surfaceChanged(
-            new GeckoDisplay.SurfaceInfo.Builder(tab.reader.getSurface())
-                .size(WEB_W, WEB_H).build());
-
-        tabs.add(tab);
-        return tab;
+        tab.session.setNavigationDelegate(new GeckoSession.NavigationDelegate() {
+            @Override public void onLocationChange(GeckoSession sess, String url,
+                    java.util.List<GeckoSession.PermissionDelegate.ContentPermission> perms,
+                    Boolean hasUserGesture) {
+                if (url != null && !url.equals("about:blank")) tab.url = url;
+            }
+            /**
+             * THE api for target="_blank" / window.open() / popups. Without it such
+             * links silently do nothing. Returning a fresh (unopened) session here
+             * makes Gecko drive it, and we register it as a new tab.
+             */
+            @Override public GeckoResult<GeckoSession> onNewSession(GeckoSession sess, String uri) {
+                if (tabs.size() >= MAX_TABS) {
+                    Log.i(TAG, "onNewSession: at MAX_TABS, loading in place -> " + uri);
+                    if (uri != null) sess.loadUri(uri);
+                    return GeckoResult.fromValue(null);
+                }
+                GeckoSession child = new GeckoSession(sessionSettings());
+                Tab t = createTab(uri, child, tab.aspect);
+                t.title = "New tab";
+                activateTab(tabs.indexOf(t));
+                Log.i(TAG, "onNewSession -> tab " + activeTab + " (" + uri + ")");
+                return GeckoResult.fromValue(child);
+            }
+            @Override public GeckoResult<org.mozilla.geckoview.AllowOrDeny> onLoadRequest(
+                    GeckoSession sess, GeckoSession.NavigationDelegate.LoadRequest req) {
+                // Some target="_blank" navigations arrive here rather than through
+                // onNewSession; open those in a real new tab instead of losing them.
+                if (req != null && req.target == GeckoSession.NavigationDelegate.TARGET_WINDOW_NEW
+                        && tabs.size() < MAX_TABS) {
+                    final String uri = req.uri;
+                    mainHandler.post(() -> {
+                        Tab t = createTab(uri, null, tab.aspect);
+                        activateTab(tabs.indexOf(t));
+                        Log.i(TAG, "onLoadRequest TARGET_WINDOW_NEW -> tab " + activeTab);
+                    });
+                    return GeckoResult.deny();
+                }
+                return GeckoResult.allow();
+            }
+        });
+        // Focused-text-field detection: Gecko tells us when an editable node takes or
+        // loses focus, which is what auto-opens the VR keyboard.
+        tab.session.getTextInput().setDelegate(new GeckoSession.TextInputDelegate() {
+            @Override public void restartInput(GeckoSession sess, int reason) {
+                if (reason == GeckoSession.TextInputDelegate.RESTART_REASON_FOCUS) {
+                    tab.textFocused = true;
+                } else if (reason == GeckoSession.TextInputDelegate.RESTART_REASON_BLUR) {
+                    tab.textFocused = false;
+                }
+            }
+            @Override public void showSoftInput(GeckoSession sess) { tab.textFocused = true; }
+            @Override public void hideSoftInput(GeckoSession sess) { tab.textFocused = false; }
+        });
     }
 
     /** Make a tab active: resume it, pause others, load lazily. No display juggling. */
@@ -153,7 +332,8 @@ public class GeckoViewManager {
         for (int i = 0; i < tabs.size(); i++) {
             try { tabs.get(i).session.setActive(i == idx); } catch (Exception e) {}
         }
-        tab.session.getTextInput().setView(imeView);
+        try { tab.session.getTextInput().setView(imeView); } catch (Exception e) {}
+        try { tab.session.setFocused(true); } catch (Exception e) {}
 
         if (!tab.loaded) {
             String want = sanitize(tab.url);
@@ -169,7 +349,7 @@ public class GeckoViewManager {
             if (tabs.size() >= MAX_TABS) { Log.i(TAG, "newTab: at MAX_TABS"); return; }
             Tab old = active();
             if (old != null && old.inFullscreen) old.session.exitFullScreen();
-            createTab(url);
+            createTab(url, null, old != null ? old.aspect : 0);
             activateTab(tabs.size() - 1);
             Log.i(TAG, "Opened Gecko tab " + activeTab + " (" + tabs.size() + " total)");
         });
@@ -186,15 +366,48 @@ public class GeckoViewManager {
         });
     }
 
-    public void closeTab() {
+    /** Jump straight to a tab (tab-overview selection). */
+    public void selectTab(int index) {
         mainHandler.post(() -> {
-            if (tabs.size() <= 1) { Log.i(TAG, "closeTab: last tab kept"); return; }
-            Tab dead = tabs.remove(activeTab);
-            destroyTab(dead);
-            if (activeTab >= tabs.size()) activeTab = tabs.size() - 1;
-            activateTab(activeTab);
-            Log.i(TAG, "Closed Gecko tab; " + tabs.size() + " left, active " + activeTab);
+            if (index < 0 || index >= tabs.size() || index == activeTab) return;
+            Tab old = active();
+            if (old != null && old.inFullscreen) old.session.exitFullScreen();
+            activateTab(index);
         });
+    }
+
+    public void closeTab() {
+        mainHandler.post(() -> closeTabAtIndex(activeTab));
+    }
+
+    /** Close a specific tab (from the overview grid). */
+    public void closeTabAt(int index) {
+        mainHandler.post(() -> closeTabAtIndex(index));
+    }
+
+    private void closeTabObject(Tab t) {
+        int i = tabs.indexOf(t);
+        if (i >= 0) closeTabAtIndex(i);
+    }
+
+    private void closeTabAtIndex(int index) {
+        if (index < 0 || index >= tabs.size()) return;
+        if (tabs.size() <= 1) {
+            // Last tab: never leave zero tabs (nothing would render). Reset it home.
+            Tab t = tabs.get(0);
+            t.session.loadUri(HOME_URL);
+            t.url = HOME_URL;
+            t.title = "";
+            t.loaded = true;
+            Log.i(TAG, "closeTab: last tab kept, reset to home");
+            return;
+        }
+        Tab dead = tabs.remove(index);
+        destroyTab(dead);
+        if (activeTab > index) activeTab--;
+        if (activeTab >= tabs.size()) activeTab = tabs.size() - 1;
+        activateTab(activeTab);
+        Log.i(TAG, "Closed Gecko tab " + index + "; " + tabs.size() + " left, active " + activeTab);
     }
 
     private void destroyTab(Tab t) {
@@ -207,36 +420,59 @@ public class GeckoViewManager {
     public int getTabCount()  { return tabs.size(); }
     public int getActiveTab() { return activeTab; }
 
-    // ── Tab-state persistence ──────────────────────────────────────────────────
+    // ── Per-tab aspect ratio ───────────────────────────────────────────────────
 
-    private android.content.SharedPreferences prefs() {
-        return context.getSharedPreferences("vr_gecko_tabs", Context.MODE_PRIVATE);
+    /** Cycle the ACTIVE tab to the next viewport shape. */
+    public void cycleAspect() {
+        mainHandler.post(() -> {
+            Tab t = active();
+            if (t == null) return;
+            t.aspect = (t.aspect + 1) % ASPECTS.length;
+            applyAspect(t);
+            Log.i(TAG, "Tab " + activeTab + " aspect -> " + ASPECT_LABELS[t.aspect]);
+        });
     }
-    private java.util.List<String> loadTabState() {
-        java.util.List<String> out = new java.util.ArrayList<>();
-        String joined = prefs().getString("tab_urls", "");
-        if (!joined.isEmpty()) {
-            for (String u : joined.split("\n")) {
-                if (u == null) continue;
-                String t = u.trim();
-                if (!t.isEmpty() && !t.equals("about:blank")) out.add(t);
-            }
+
+    private void applyAspect(Tab t) {
+        resizeTab(t, ASPECTS[t.aspect][0], ASPECTS[t.aspect][1]);
+    }
+
+    /**
+     * Snapshot of the whole tab model for the VR UI, as one string:
+     *   line 0: activeIndex\tcount\tprogress\ttextFocused
+     *   line N: url\ttitle\taspectLabel\taspectIndex
+     */
+    public String getTabInfo() {
+        StringBuilder sb = new StringBuilder();
+        Tab a = active();
+        sb.append(activeTab).append('\t')
+          .append(tabs.size()).append('\t')
+          .append(a != null ? a.progress : 100).append('\t')
+          .append(a != null && a.textFocused ? 1 : 0).append('\n');
+        for (Tab t : tabs) {
+            String u = t.url == null ? "" : t.url;
+            String ti = t.title == null ? "" : t.title;
+            sb.append(u.replace('\t', ' ').replace('\n', ' ')).append('\t')
+              .append(ti.replace('\t', ' ').replace('\n', ' ')).append('\t')
+              .append(ASPECT_LABELS[t.aspect]).append('\t')
+              .append(t.aspect).append('\n');
         }
-        return out;
+        return sb.toString();
     }
-    private int loadActiveIndex() { return prefs().getInt("active_tab", 0); }
+
+    // ── Tab-state persistence (delegated to SessionStore) ─────────────────────
 
     public void saveTabState() {
         try {
-            StringBuilder sb = new StringBuilder();
+            java.util.List<SessionStore.TabRecord> recs = new java.util.ArrayList<>();
             for (Tab t : tabs) {
-                String u = (t.url != null && !t.url.isEmpty() && !t.url.equals("about:blank")) ? t.url : HOME_URL;
-                sb.append(u).append('\n');
+                String u = (t.url != null && !t.url.isEmpty() && !t.url.equals("about:blank"))
+                    ? t.url : HOME_URL;
+                recs.add(new SessionStore.TabRecord(u, t.title, t.aspect));
+                // Push any pending session data (cookies, form state) to disk.
+                try { t.session.flushSessionState(); } catch (Exception e) {}
             }
-            prefs().edit()
-                .putString("tab_urls", sb.toString())
-                .putInt("active_tab", activeTab)
-                .apply();
+            store.saveTabs(recs, activeTab);
         } catch (Exception e) { Log.w(TAG, "saveTabState (gecko) failed: " + e); }
     }
 
@@ -391,22 +627,28 @@ public class GeckoViewManager {
     public void resize(int w, int h) {
         mainHandler.post(() -> {
             Tab t = active();
-            if (t == null || t.display == null) return;
-            try {
-                ImageReader old = t.reader;
-                t.reader = ImageReader.newInstance(w, h, PixelFormat.RGBX_8888, 3);
-                final Tab ft = t;
-                t.reader.setOnImageAvailableListener(r -> onImageAvailable(r, ft), readerHandler);
-                t.display.surfaceChanged(
-                    new GeckoDisplay.SurfaceInfo.Builder(t.reader.getSurface())
-                        .size(w, h).build());
-                if (old != null) old.close();
-                t.w = w; t.h = h;
-                Log.i(TAG, "Gecko (tab " + activeTab + ") resized to " + w + "x" + h);
-            } catch (Exception e) {
-                Log.e(TAG, "Gecko resize failed: " + e);
-            }
+            if (t != null) resizeTab(t, w, h);
         });
+    }
+
+    /** Rebuild one tab's capture surface at a new size (main thread only). */
+    private void resizeTab(Tab t, int w, int h) {
+        if (t == null || t.display == null) return;
+        if (t.w == w && t.h == h) return;
+        try {
+            ImageReader old = t.reader;
+            final Tab ft = t;
+            t.reader = ImageReader.newInstance(w, h, PixelFormat.RGBX_8888, 3);
+            t.reader.setOnImageAvailableListener(r -> onImageAvailable(r, ft), readerHandler);
+            t.display.surfaceChanged(
+                new GeckoDisplay.SurfaceInfo.Builder(t.reader.getSurface())
+                    .size(w, h).build());
+            if (old != null) old.close();
+            t.w = w; t.h = h;
+            Log.i(TAG, "Gecko (tab " + tabs.indexOf(t) + ") resized to " + w + "x" + h);
+        } catch (Exception e) {
+            Log.e(TAG, "Gecko resize failed: " + e);
+        }
     }
 
     public void submitEnter() {

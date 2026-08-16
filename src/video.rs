@@ -3,10 +3,13 @@ use jni::objects::{JObject, JValue};
 use jni::sys::jobject;
 use android_activity::AndroidApp;
 
+/// Retained for the system file-picker path; the Media Center is the normal route.
+#[allow(dead_code)]
 pub struct VideoManager;
 
 impl VideoManager {
     /// Launches the Android system file picker via MainActivity.launchVideoPicker()
+    #[allow(dead_code)]
     pub fn pick_video(app: &AndroidApp) {
         info!("VideoManager: Calling Java launchVideoPicker...");
         

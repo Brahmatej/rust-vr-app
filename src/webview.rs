@@ -186,6 +186,87 @@ pub fn switch_tab(app: &AndroidApp, delta: i32) {
 /// Close the active tab (keeps at least one).
 pub fn close_tab(app: &AndroidApp) { call_void(app, "webViewCloseTab"); }
 
+/// Jump straight to a tab by index (tab-overview selection).
+pub fn select_tab(app: &AndroidApp, index: i32) {
+    with_activity(app, |env, activity| {
+        if let Err(e) = env.call_method(
+            activity, "webViewSelectTab", "(I)V", &[JValue::Int(index)],
+        ) {
+            error!("webview: webViewSelectTab failed: {:?}", e);
+        }
+    });
+}
+
+/// Close a specific tab by index (from the tab overview).
+pub fn close_tab_at(app: &AndroidApp, index: i32) {
+    with_activity(app, |env, activity| {
+        if let Err(e) = env.call_method(
+            activity, "webViewCloseTabAt", "(I)V", &[JValue::Int(index)],
+        ) {
+            error!("webview: webViewCloseTabAt failed: {:?}", e);
+        }
+    });
+}
+
+/// Cycle the focused tab's own viewport shape (per-tab aspect ratio).
+pub fn cycle_aspect(app: &AndroidApp) { call_void(app, "webViewCycleAspect"); }
+
+/// One tab in the browser's tab model, as reported by Java.
+#[derive(Clone, Default)]
+pub struct TabInfo {
+    pub url:    String,
+    pub title:  String,
+    pub aspect: String,
+}
+
+/// Snapshot of the whole tab model (active index, progress, focused-field flag).
+#[derive(Clone, Default)]
+pub struct TabSnapshot {
+    pub active:       usize,
+    pub progress:     i32,
+    pub text_focused: bool,
+    pub tabs:         Vec<TabInfo>,
+}
+
+/// Poll Java for the current tab model. Cheap enough for a few times a second;
+/// don't call it every frame.
+pub fn tab_snapshot(app: &AndroidApp) -> Option<TabSnapshot> {
+    let mut out: Option<TabSnapshot> = None;
+    with_activity(app, |env, activity| {
+        let raw = match env.call_method(activity, "webViewTabInfo", "()Ljava/lang/String;", &[]) {
+            Ok(v) => v,
+            Err(e) => { error!("webview: webViewTabInfo failed: {:?}", e); return; }
+        };
+        let obj = match raw.l() { Ok(o) => o, Err(_) => return };
+        let s: String = match env.get_string(&jni::objects::JString::from(obj)) {
+            Ok(s) => s.into(),
+            Err(_) => return,
+        };
+        if s.trim().is_empty() { return; }
+
+        let mut lines = s.lines();
+        let head: Vec<&str> = match lines.next() { Some(h) => h.split('\t').collect(), None => return };
+        if head.len() < 4 { return; }
+        let mut snap = TabSnapshot {
+            active:       head[0].parse().unwrap_or(0),
+            progress:     head[2].parse().unwrap_or(100),
+            text_focused: head[3] == "1",
+            tabs:         Vec::new(),
+        };
+        for line in lines {
+            if line.trim().is_empty() { continue; }
+            let f: Vec<&str> = line.split('\t').collect();
+            snap.tabs.push(TabInfo {
+                url:    f.first().copied().unwrap_or("").to_string(),
+                title:  f.get(1).copied().unwrap_or("").to_string(),
+                aspect: f.get(2).copied().unwrap_or("").to_string(),
+            });
+        }
+        out = Some(snap);
+    });
+    out
+}
+
 // ── Voice search (PS5 mic) ──────────────────────────────────────────────────────
 
 /// Start PS5-mic voice search (Java SpeechRecognizer → `onVoiceResult`).

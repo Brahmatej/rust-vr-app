@@ -135,6 +135,7 @@ public class MainActivity extends NativeActivity {
         }
         requestAllFilesAccess();
         restoreWebData();
+        restoreGeckoProfile();
         this.activeEngine = 1;
     }
 
@@ -547,6 +548,38 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    /** Jump straight to a tab index (tab-overview selection). */
+    public void webViewSelectTab(int i) {
+        if (this.geckoReady) {
+            this.geckoViewManager.selectTab(i);
+        }
+    }
+
+    /** Close a specific tab by index (from the tab overview). */
+    public void webViewCloseTabAt(int i) {
+        if (this.geckoReady) {
+            this.geckoViewManager.closeTabAt(i);
+        }
+    }
+
+    /** Cycle the focused tab's own viewport shape (D-pad right in browser mode). */
+    public void webViewCycleAspect() {
+        if (this.geckoReady) {
+            this.geckoViewManager.cycleAspect();
+        }
+    }
+
+    /**
+     * Whole tab model as one string for the VR UI (see GeckoViewManager.getTabInfo).
+     * Empty string when the engine has not booted yet.
+     */
+    public String webViewTabInfo() {
+        if (this.geckoReady) {
+            return this.geckoViewManager.getTabInfo();
+        }
+        return "";
+    }
+
     public void setBrowserActive(boolean z) {
         GeckoViewManager geckoViewManager = this.geckoViewManager;
         if (geckoViewManager != null) {
@@ -679,6 +712,7 @@ public class MainActivity extends NativeActivity {
             geckoViewManager.saveTabState();
         }
         backupWebData();
+        backupGeckoProfile();
         super.onPause();
     }
 
@@ -689,12 +723,14 @@ public class MainActivity extends NativeActivity {
             geckoViewManager.saveTabState();
         }
         backupWebData();
+        backupGeckoProfile();
         super.onStop();
     }
 
     @Override // android.app.NativeActivity, android.app.Activity
     protected void onDestroy() {
         backupWebData();
+        backupGeckoProfile();
         stopVideo();
         if (this.overlayAdded && this.gamepadOverlay != null) {
             try {
@@ -773,6 +809,20 @@ public class MainActivity extends NativeActivity {
             Log.w(TAG, "backupWebData failed: " + e.getMessage());
         }
     }
+
+    // Gecko profile / auth persistence lives in SessionStore — see that class.
+    // Created lazily: an Activity has no base context until attachBaseContext runs,
+    // so a field initializer here would NPE before onCreate.
+    private SessionStore sessionStore;
+
+    private SessionStore store() {
+        if (this.sessionStore == null) this.sessionStore = new SessionStore(this);
+        return this.sessionStore;
+    }
+
+    private void restoreGeckoProfile() { store().restoreAuth(); }
+
+    private void backupGeckoProfile()  { store().backupAuth(); }
 
     private void copyRecursive(File file, File file2) throws IOException {
         if (file.isDirectory()) {
