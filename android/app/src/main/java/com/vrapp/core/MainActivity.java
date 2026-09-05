@@ -912,21 +912,118 @@ public class MainActivity extends NativeActivity {
         });
     }
 
+    /**
+     * True when a candidate poster frame carries essentially no picture.
+     *
+     * Sampled on a sparse grid (every 4th pixel on both axes) rather than per
+     * pixel: this runs on the thumb-gen pool for every candidate of every video,
+     * and a full scan of a 320x180 frame is wasted work when a grid answers the
+     * same question. A frame counts as usable once more than 2% of the samples
+     * are above a low luma threshold, which passes genuinely dark-but-real shots
+     * while rejecting leaders, fades and blank frames.
+     */
+    private static boolean isMostlyBlack(Bitmap bitmap) {
+        if (bitmap == null) {
+            return true;
+        }
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        if (width <= 0 || height <= 0) {
+            return true;
+        }
+        int samples = 0;
+        int lit = 0;
+        for (int y = 0; y < height; y += 4) {
+            for (int x = 0; x < width; x += 4) {
+                int pixel = bitmap.getPixel(x, y);
+                int r = (pixel >> 16) & 255;
+                int g = (pixel >> 8) & 255;
+                int b = pixel & 255;
+                // Rec. 601 luma, integer form.
+                int luma = ((r * 299) + (g * 587) + (b * 114)) / 1000;
+                if (luma > 18) {
+                    lit++;
+                }
+                samples++;
+            }
+        }
+        if (samples == 0) {
+            return true;
+        }
+        return (lit * 100) < (samples * 2);
+    }
+
     /* JADX INFO: Access modifiers changed from: private */
     public /* synthetic */ void lambda$requestThumbnail$4(String str, int i, int i2) {
         MediaMetadataRetriever mediaMetadataRetriever = new MediaMetadataRetriever();
         try {
             try {
                 mediaMetadataRetriever.setDataSource(str);
-                Bitmap scaledFrameAtTime = mediaMetadataRetriever.getScaledFrameAtTime(1000000L, 2, i, i2);
-                if (scaledFrameAtTime == null) {
-                    scaledFrameAtTime = mediaMetadataRetriever.getScaledFrameAtTime(1000000L, 3, i, i2);
+
+                // Poster frames come from the MIDDLE of the video, not a fixed 1s in.
+                // A second in is titles, a fade-in or a black leader on most real
+                // footage, which is why nearly every card came up black. Sample the
+                // midpoint first, then walk further through the film; each candidate
+                // is checked with isMostlyBlack() and only kept once it has actual
+                // picture content.
+                long durationMs = 0L;
+                try {
+                    String durationStr = mediaMetadataRetriever.extractMetadata(
+                            MediaMetadataRetriever.METADATA_KEY_DURATION);
+                    if (durationStr != null) {
+                        durationMs = Long.parseLong(durationStr);
+                    }
+                } catch (Exception unusedDuration) {
                 }
-                if (scaledFrameAtTime == null) {
-                    scaledFrameAtTime = mediaMetadataRetriever.getScaledFrameAtTime(0L, 2, i, i2);
+
+                long[] candidatesUs;
+                if (durationMs > 0L) {
+                    long durationUs = durationMs * 1000L;
+                    candidatesUs = new long[]{
+                        durationUs / 2L,            // middle
+                        durationUs * 2L / 5L,       // 40%
+                        durationUs * 3L / 5L,       // 60%
+                        durationUs / 4L,            // 25%
+                        durationUs * 3L / 4L,       // 75%
+                        durationUs / 10L,           // 10%
+                    };
+                } else {
+                    // Unknown duration (some containers report none): probe fixed
+                    // offsets rather than giving up on the first frame.
+                    candidatesUs = new long[]{
+                        30000000L, 10000000L, 5000000L, 1000000L, 0L,
+                    };
                 }
+
+                Bitmap scaledFrameAtTime = null;
+                for (int c = 0; c < candidatesUs.length; c++) {
+                    long atUs = candidatesUs[c];
+                    if (atUs < 0L) {
+                        continue;
+                    }
+                    Bitmap candidate = mediaMetadataRetriever.getScaledFrameAtTime(atUs, 2, i, i2);
+                    if (candidate == null) {
+                        candidate = mediaMetadataRetriever.getScaledFrameAtTime(atUs, 3, i, i2);
+                    }
+                    if (candidate == null) {
+                        continue;
+                    }
+                    if (!isMostlyBlack(candidate)) {
+                        scaledFrameAtTime = candidate;
+                        break;
+                    }
+                    // Black frame: keep the first one as a fallback so a genuinely
+                    // dark video still gets a poster, but keep looking for better.
+                    if (scaledFrameAtTime == null) {
+                        scaledFrameAtTime = candidate;
+                    } else {
+                        candidate.recycle();
+                    }
+                }
+
                 if (scaledFrameAtTime == null) {
-                    Bitmap frameAtTime = mediaMetadataRetriever.getFrameAtTime(1000000L, 2);
+                    Bitmap frameAtTime = mediaMetadataRetriever.getFrameAtTime(
+                            durationMs > 0L ? (durationMs * 1000L) / 2L : 1000000L, 2);
                     if (frameAtTime == null) {
                         frameAtTime = mediaMetadataRetriever.getFrameAtTime(-1L);
                     }

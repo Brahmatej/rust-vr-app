@@ -263,6 +263,13 @@ pub struct FileBrowser {
     /// thread — `/storage/emulated/0` can be tens of thousands of files and the
     /// render thread must not wait on it.
     scan_rx:            Option<std::sync::mpsc::Receiver<Vec<FileEntry>>>,
+    /// Path the cursor should return to after a re-scan or a re-open.
+    ///
+    /// The Media Center used to reset to the first entry every time it was opened,
+    /// because opening it re-ran the scan and the scan reset `selected_index`. This
+    /// is updated as the cursor moves and when a file is played, and the selection
+    /// is restored from it once fresh results land.
+    remembered_path:    Option<PathBuf>,
 }
 
 /// Where the recursive media scan starts, and how far it is allowed to go.
@@ -349,6 +356,7 @@ impl FileBrowser {
             nav_cooldown:   0,
             nav_hold:       0,
             scan_rx:        None,
+            remembered_path: None,
         };
         b.refresh_entries();
         b
@@ -361,7 +369,52 @@ impl FileBrowser {
         self.category = cat;
         self.selected_index = 0;
         self.carousel_pos = 0.0;
+        // A different category is a different list, so the remembered file from the
+        // old one must not pull the cursor.
+        self.remembered_path = None;
         self.refresh_entries();
+    }
+
+    /// Cycle Movies -> Music -> Files -> Movies (D-pad right in the Media Center).
+    pub fn next_category(&mut self) {
+        let next = match self.category {
+            Category::Movies => Category::Music,
+            Category::Music  => Category::Files,
+            Category::Files  => Category::Movies,
+        };
+        self.set_category(next);
+        log::info!("Media Center: category -> {}", match self.category {
+            Category::Movies => "Movies",
+            Category::Music  => "Music",
+            Category::Files  => "Files",
+        });
+    }
+
+    /// Cycle the other way (D-pad left).
+    pub fn prev_category(&mut self) {
+        let prev = match self.category {
+            Category::Movies => Category::Files,
+            Category::Music  => Category::Movies,
+            Category::Files  => Category::Music,
+        };
+        self.set_category(prev);
+        log::info!("Media Center: category -> {}", match self.category {
+            Category::Movies => "Movies",
+            Category::Music  => "Music",
+            Category::Files  => "Files",
+        });
+    }
+
+    /// Populate only if there is nothing to show yet.
+    ///
+    /// Opening the Media Center used to call `refresh_entries` unconditionally,
+    /// which restarted the scan and reset the cursor to the first entry. The list
+    /// is kept between visits now; this only fills it the first time, or after a
+    /// scan genuinely produced nothing.
+    pub fn refresh_if_empty(&mut self) {
+        if self.entries.is_empty() && self.scan_rx.is_none() {
+            self.refresh_entries();
+        }
     }
 
     /// Pick up a finished background scan. Called once per frame while the Media
@@ -377,8 +430,15 @@ impl FileBrowser {
                 }
                 log::info!("FileBrowser: recursive scan found {} media file(s)", found.len());
                 self.entries = found;
-                self.selected_index = 0;
-                self.carousel_pos = 0.0;
+                // Restore the cursor onto the same file it was on before the scan,
+                // so re-opening the Media Center (or a re-scan) does not throw the
+                // user back to the first video.
+                self.selected_index = self.remembered_path.as_ref()
+                    .and_then(|p| self.entries.iter().position(|e| &e.path == p))
+                    .unwrap_or(0);
+                self.carousel_pos = self.filtered_indices().iter()
+                    .position(|&i| i == self.selected_index)
+                    .unwrap_or(0) as f32;
                 self.error_msg = if self.entries.is_empty() {
                     Some("No media found under /storage/emulated/0.".into())
                 } else { None };
@@ -590,12 +650,19 @@ impl FileBrowser {
         if let Some(pos) = idx.iter().position(|&i| i == self.selected_index) {
             if pos > 0 { self.selected_index = idx[pos - 1]; }
         }
+        self.remember_selection();
     }
     pub fn move_down(&mut self) {
         let idx = self.filtered_indices();
         if let Some(pos) = idx.iter().position(|&i| i == self.selected_index) {
             if pos + 1 < idx.len() { self.selected_index = idx[pos + 1]; }
         }
+        self.remember_selection();
+    }
+
+    /// Record the highlighted path so the cursor survives a re-scan / re-open.
+    fn remember_selection(&mut self) {
+        self.remembered_path = self.entries.get(self.selected_index).map(|e| e.path.clone());
     }
     /// Open the highlighted entry. Directories are entered in place; a media file
     /// is RETURNED to the caller, which turns it into an `Intent::PlayFile` — the
@@ -605,9 +672,15 @@ impl FileBrowser {
         if entry.is_dir {
             self.current_path = entry.path;
             self.search_query.clear();
+            // Entering a folder is a genuine move, so the remembered file from the
+            // previous directory must not drag the cursor back.
+            self.remembered_path = None;
             self.refresh_entries();
             None
         } else {
+            // Remember what was played: re-opening the Media Center should land on
+            // the file just watched, not back at the top of the list.
+            self.remembered_path = Some(entry.path.clone());
             Some(entry.path)
         }
     }
@@ -1392,11 +1465,15 @@ impl VrUi {
                 });
                 ui.add_space(10.0);
                 // Breadcrumb: for Movies/Music this is an aggregate, not a folder.
+                // Files shows the real directory and how to move around it, since
+                // that is now reachable from the D-pad.
                 let path_str = match self.file_browser.category {
-                    Category::Files => self.file_browser.current_path.to_string_lossy().to_string(),
+                    Category::Files => format!("{}   ·   ✕ open   ○ up",
+                        self.file_browser.current_path.to_string_lossy()),
                     _ if self.file_browser.scanning() =>
                         format!("Scanning {} …", MEDIA_ROOT),
-                    _ => format!("All media under {}", MEDIA_ROOT),
+                    _ => format!("All media under {}   ·   ← → category",
+                        MEDIA_ROOT),
                 };
                 ui.label(egui::RichText::new(path_str).size(13.0).color(txt2));
                 ui.add_space(8.0);

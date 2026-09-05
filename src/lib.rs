@@ -398,11 +398,22 @@ impl ApplicationHandler for VRApp {
                             if gp.toggle_ui     { let b = ui.base_focus(); ui.set_focus(b); }
                         }
                         ui::Focus::MediaCenter => {
-                            // Left-stick coverflow sweep + D-pad; X open; O up a level.
+                            // Left stick / D-pad up-down sweep the coverflow; D-pad
+                            // left-right switch category (Movies / Music / Files).
+                            //
+                            // Files is a real directory browser and used to be
+                            // reachable only by clicking its pill with the pointer,
+                            // so once the pointer was removed there was no way to
+                            // leave the aggregated Movies list at all. Up/down and
+                            // the stick already cover navigation, so left/right were
+                            // free to carry the category.
                             ui.file_browser.handle_stick(gp.left_stick_x);
-                            if gp.nav_up   || gp.nav_left  { ui.file_browser.move_up(); }
-                            if gp.nav_down || gp.nav_right { ui.file_browser.move_down(); }
+                            if gp.nav_up    { ui.file_browser.move_up(); }
+                            if gp.nav_down  { ui.file_browser.move_down(); }
+                            if gp.nav_right { ui.file_browser.next_category(); }
+                            if gp.nav_left  { ui.file_browser.prev_category(); }
                             if (gp.play_pause && !hot) || gp.confirm { ui.media_select(); }
+                            // O steps up a directory while browsing Files.
                             if gp.back { ui.file_browser.go_back(); }
                             // Create closes it again (it opened it), Options swaps to the dock.
                             if gp.open_file_picker { let b = ui.base_focus(); ui.set_focus(b); }
@@ -462,7 +473,11 @@ impl ApplicationHandler for VRApp {
                             if gp.toggle_ui     { ui.toggle_focus(ui::Focus::Keyboard); }
                             if gp.open_settings { ui.toggle_focus(ui::Focus::Dock); }
                             if gp.open_file_picker {
-                                ui.file_browser.refresh_entries();
+                                // Do NOT re-scan on open: the scan resets the cursor,
+                                // which is what made the Media Center jump back to the
+                                // first video every time. Results persist; poll_scan
+                                // and the Files category refresh explicitly.
+                                ui.file_browser.refresh_if_empty();
                                 ui.toggle_focus(ui::Focus::MediaCenter);
                             }
                             // Geometry is bound identically in every focus, so the
@@ -479,7 +494,11 @@ impl ApplicationHandler for VRApp {
                             if gp.open_settings { ui.toggle_focus(ui::Focus::Dock); }
                             if gp.toggle_ui     { ui.toggle_focus(ui::Focus::Keyboard); }
                             if gp.open_file_picker {
-                                ui.file_browser.refresh_entries();
+                                // Do NOT re-scan on open: the scan resets the cursor,
+                                // which is what made the Media Center jump back to the
+                                // first video every time. Results persist; poll_scan
+                                // and the Files category refresh explicitly.
+                                ui.file_browser.refresh_if_empty();
                                 ui.toggle_focus(ui::Focus::MediaCenter);
                             }
                             if gp.play_pause   { toggle_playback(&self.app, &self.ndk_decoder); }
