@@ -205,13 +205,20 @@ impl ApplicationHandler for VRApp {
                     if ui.media_visible() {
                         let ctx = state.egui_ctx();
                         for t in thumbs::drain() {
+                            // Build the image, upload it, then drop the CPU-side
+                            // RGBA immediately: holding it alongside the GPU copy
+                            // doubles the cost of every resident poster.
                             let img = egui::ColorImage::from_rgba_unmultiplied(
                                 [t.w as usize, t.h as usize], &t.rgba);
+                            drop(t.rgba);
                             let tex = ctx.load_texture(
                                 format!("thumb:{}", t.path), img, egui::TextureOptions::LINEAR);
                             ui.file_browser.set_thumbnail(
                                 std::path::Path::new(&t.path), tex, t.glow);
                         }
+                        // Release posters that scrolled away BEFORE asking for new
+                        // ones, so the resident set never exceeds the keep-window.
+                        ui.file_browser.evict_distant_thumbnails();
                         for path in ui.file_browser.pending_thumbnail_requests(12) {
                             thumbs::request(&self.app, &path.to_string_lossy(), 320, 180);
                         }

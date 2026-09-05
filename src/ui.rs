@@ -250,6 +250,19 @@ const MEDIA_ROOT: &str = "/storage/emulated/0";
 const SCAN_MAX_DEPTH: usize = 5;
 const SCAN_MAX_FILES: usize = 600;
 
+/// How far from the cursor a poster is allowed to stay resident.
+///
+/// A 320x180 RGBA poster costs ~225 KB as a GPU texture. The recursive Movies
+/// scan returns hundreds of entries (147 on this device), and posters were
+/// never released once decoded: that held ~129 MB against a 256 MB heap limit,
+/// and the resulting GC destroyed egui textures while the renderer was still
+/// submitting draws referencing them — `DestroyedResource` spam followed by a
+/// SIGSEGV in `android_main`.
+///
+/// The coverflow only draws tiles within 3.4 slots of the cursor (~8 cards), so
+/// keeping this many either side is generous while staying bounded.
+const THUMB_KEEP_RADIUS: usize = 16;
+
 /// Directories that are never worth walking: app sandboxes, caches and thumbnail
 /// stores hold no user media but plenty of files.
 fn skip_dir(name: &str) -> bool {
@@ -481,10 +494,46 @@ impl FileBrowser {
         self.nav_cooldown = if self.nav_hold > 28 { 2 } else if self.nav_hold > 10 { 4 } else { 8 };
     }
 
+    /// Inclusive index window around the cursor that may hold posters.
+    fn thumb_window(&self) -> (usize, usize) {
+        let lo = self.selected_index.saturating_sub(THUMB_KEEP_RADIUS);
+        let hi = self.selected_index.saturating_add(THUMB_KEEP_RADIUS)
+            .min(self.entries.len().saturating_sub(1));
+        (lo, hi)
+    }
+
+    /// Release posters that have scrolled far from the cursor.
+    ///
+    /// Dropping the `TextureHandle` is what actually frees the GPU texture, and
+    /// clearing `thumb_requested` lets the tile be re-decoded if the user scrolls
+    /// back. Without this the cache grows with the whole scan result and the
+    /// process is eventually killed by the allocator, not by egui.
+    pub fn evict_distant_thumbnails(&mut self) {
+        if self.entries.is_empty() { return; }
+        let (lo, hi) = self.thumb_window();
+        let mut freed = 0usize;
+        for (i, e) in self.entries.iter_mut().enumerate() {
+            if (i < lo || i > hi) && e.thumbnail.is_some() {
+                e.thumbnail = None;
+                e.glow = None;
+                e.thumb_requested = false;
+                freed += 1;
+            }
+        }
+        if freed > 0 {
+            log::info!("FileBrowser: evicted {} off-screen thumbnail(s)", freed);
+        }
+    }
+
     /// Video paths still needing a thumbnail (marks them requested).
+    ///
+    /// Only tiles inside the keep-window are requested: decoding all several
+    /// hundred scan results is what exhausted the heap.
     pub fn pending_thumbnail_requests(&mut self, max: usize) -> Vec<PathBuf> {
         let mut out = Vec::new();
-        for e in self.entries.iter_mut() {
+        if self.entries.is_empty() { return out; }
+        let (lo, hi) = self.thumb_window();
+        for e in self.entries[lo..=hi].iter_mut() {
             if e.kind == MediaKind::Video && !e.thumb_requested && e.thumbnail.is_none() {
                 e.thumb_requested = true;
                 out.push(e.path.clone());

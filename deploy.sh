@@ -25,9 +25,13 @@ step() { printf '\n=== %s ===\n' "$1"; }
 applogs() {
   local pid; pid="$(adb shell pidof $PKG | tr -d '\r')"
   [ -z "$pid" ] && { echo "not running"; return 1; }
-  adb logcat -d -t "${1:-300}" 2>/dev/null \
-    | grep -E "(^|[^0-9])$pid " \
-    | grep -vE "HEAD \[|Overlay HAT|D-pad HAT"
+  # Match the pid in logcat's OWN pid column (field 3), not anywhere on the line:
+  # the loose pattern silently matched nothing on this device and made a healthy
+  # running app look dead. Read the crash buffer too, or a native SIGSEGV is
+  # invisible here.
+  adb logcat -d -b main -b crash -t "${1:-300}" 2>/dev/null \
+    | awk -v pid="$pid" '$3 == pid' \
+    | grep -vE "HEAD \[|Overlay HAT|D-pad HAT|qdgralloc"
 }
 
 if [ "${1:-all}" = logs ]; then applogs "${2:-300}"; exit $?; fi
