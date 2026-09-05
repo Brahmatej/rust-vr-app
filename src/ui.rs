@@ -514,12 +514,21 @@ impl FileBrowser {
         self.nav_cooldown = if self.nav_hold > 28 { 2 } else if self.nav_hold > 10 { 4 } else { 8 };
     }
 
-    /// Inclusive index window around the cursor that may hold posters.
-    fn thumb_window(&self) -> (usize, usize) {
-        let lo = self.selected_index.saturating_sub(THUMB_KEEP_RADIUS);
-        let hi = self.selected_index.saturating_add(THUMB_KEEP_RADIUS)
-            .min(self.entries.len().saturating_sub(1));
-        (lo, hi)
+    /// Entry indices allowed to hold a poster: a window around the cursor measured
+    /// along the FILTERED list, because that is the list the coverflow draws from.
+    ///
+    /// Measuring along `entries` instead would disagree with what is on screen as
+    /// soon as a search filter is active — the cursor's raw index and its position
+    /// in the visible strip are different numbers, so a visible card could fall
+    /// outside the window and have its texture pulled while still being drawn.
+    fn thumb_window_set(&self) -> std::collections::HashSet<usize> {
+        let fi = self.filtered_indices();
+        let Some(pos) = fi.iter().position(|&i| i == self.selected_index) else {
+            return fi.into_iter().take(2 * THUMB_KEEP_RADIUS + 1).collect();
+        };
+        let lo = pos.saturating_sub(THUMB_KEEP_RADIUS);
+        let hi = (pos + THUMB_KEEP_RADIUS).min(fi.len().saturating_sub(1));
+        fi[lo..=hi].iter().copied().collect()
     }
 
     /// Release posters that have scrolled far from the cursor.
@@ -528,12 +537,15 @@ impl FileBrowser {
     /// clearing `thumb_requested` lets the tile be re-decoded if the user scrolls
     /// back. Without this the cache grows with the whole scan result and the
     /// process is eventually killed by the allocator, not by egui.
+    ///
+    /// MUST be called after the frame is built (see the call site in lib.rs): a
+    /// texture dropped mid-frame is still referenced by this frame's draw list.
     pub fn evict_distant_thumbnails(&mut self) {
         if self.entries.is_empty() { return; }
-        let (lo, hi) = self.thumb_window();
+        let keep = self.thumb_window_set();
         let mut freed = 0usize;
         for (i, e) in self.entries.iter_mut().enumerate() {
-            if (i < lo || i > hi) && e.thumbnail.is_some() {
+            if !keep.contains(&i) && e.thumbnail.is_some() {
                 e.thumbnail = None;
                 e.glow = None;
                 e.thumb_requested = false;
@@ -552,8 +564,11 @@ impl FileBrowser {
     pub fn pending_thumbnail_requests(&mut self, max: usize) -> Vec<PathBuf> {
         let mut out = Vec::new();
         if self.entries.is_empty() { return out; }
-        let (lo, hi) = self.thumb_window();
-        for e in self.entries[lo..=hi].iter_mut() {
+        let keep = self.thumb_window_set();
+        let mut idx: Vec<usize> = keep.into_iter().collect();
+        idx.sort_unstable();
+        for i in idx {
+            let Some(e) = self.entries.get_mut(i) else { continue };
             if e.kind == MediaKind::Video && !e.thumb_requested && e.thumbnail.is_none() {
                 e.thumb_requested = true;
                 out.push(e.path.clone());
@@ -952,18 +967,25 @@ impl VrUi {
 
     // ── Panel pointer ─────────────────────────────────────────────────────────
 
-    /// True while a panel (not the page / bare video) owns input, i.e. while the
-    /// synthesised pointer should exist at all.
-    pub fn pointer_active(&self) -> bool {
-        matches!(self.focus,
-            Focus::Dock | Focus::MediaCenter | Focus::Keyboard | Focus::TabOverview)
-    }
+    /// Whether a synthesised egui pointer should exist at all.
+    ///
+    /// Always false. The panels (Dock, Media Center, Keyboard, Tab Overview) are
+    /// D-pad surfaces: every one of them already has explicit directional
+    /// navigation and a confirm button, so a second, free-floating pointer over
+    /// the same widgets was a duplicate input path that could disagree with the
+    /// D-pad selection. The BROWSER cursor is a separate mechanism
+    /// (`WebBrowser::cursor_x/y`, mapped onto the page) and is unaffected.
+    pub fn pointer_active(&self) -> bool { false }
 
     /// Is the pointer over a clickable widget right now? (egui's own verdict.)
     pub fn pointer_hot(&self) -> bool { self.pointer_hot }
 
     /// Right stick moves the panel pointer. Same feel as the browser cursor:
     /// quadratic ramp for precision near the deadzone, fast travel at the rim.
+    ///
+    /// Unbound: panels are D-pad surfaces (see `pointer_active`). Retained so the
+    /// pointer can be restored for a genuinely 2D surface without rewriting it.
+    #[allow(dead_code)]
     pub fn move_ui_cursor(&mut self, sx: f32, sy: f32) {
         const DEAD: f32 = 0.15;
         let mag = (sx * sx + sy * sy).sqrt();
@@ -975,6 +997,10 @@ impl VrUi {
     }
 
     /// Synthesise a full click (down+up) at the pointer.
+    ///
+    /// Unbound alongside `move_ui_cursor`; ✕ goes straight to each panel's own
+    /// gamepad binding now.
+    #[allow(dead_code)]
     pub fn ui_click(&mut self) {
         let pos = self.ui_cursor;
         for pressed in [true, false] {

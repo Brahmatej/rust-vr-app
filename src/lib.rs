@@ -219,9 +219,6 @@ impl ApplicationHandler for VRApp {
                             ui.file_browser.set_thumbnail(
                                 std::path::Path::new(&t.path), tex, t.glow);
                         }
-                        // Release posters that scrolled away BEFORE asking for new
-                        // ones, so the resident set never exceeds the keep-window.
-                        ui.file_browser.evict_distant_thumbnails();
                         for path in ui.file_browser.pending_thumbnail_requests(12) {
                             thumbs::request(&self.app, &path.to_string_lossy(), 320, 180);
                         }
@@ -230,7 +227,20 @@ impl ApplicationHandler for VRApp {
                     ui.render(state.egui_ctx(), self.renderer.as_ref().map(|r| r.vr_mode).unwrap_or(false));
                     
                     let output = state.egui_ctx().end_pass();
-                    
+
+                    // Evict AFTER the frame is built, never before it.
+                    //
+                    // Dropping a TextureHandle mid-frame made egui queue the free in
+                    // THIS frame's textures_delta while the tile that used it had
+                    // already been tessellated into the same frame's draw list, so
+                    // the renderer drew a texture that was being destroyed. Doing it
+                    // here means the poster was either drawn this frame (and is
+                    // released next frame, via the renderer's deferred free) or was
+                    // outside the window and never drawn at all.
+                    if ui.media_visible() {
+                        ui.file_browser.evict_distant_thumbnails();
+                    }
+
                     state.handle_platform_output(window, output.platform_output.clone());
                     
                     full_output = Some(output);
@@ -359,15 +369,15 @@ impl ApplicationHandler for VRApp {
                     // ── Modal dispatch on the focus state machine ─────────────
                     // Exactly one arm runs, so no two surfaces can claim a button.
                     //
-                    // In every PANEL focus the right stick drives a pointer over the
-                    // egui surface, and ✕ is its click. `pointer_hot` is egui's own
-                    // answer to "is the pointer over a widget?" — when it is, the
-                    // widget handles ✕ and the panel's gamepad binding stands down,
-                    // so a click can never fire two actions at once.
-                    if ui.pointer_active() {
-                        ui.move_ui_cursor(gp.right_stick_x, gp.right_stick_y);
-                        if gp.play_pause { ui.ui_click(); }
-                    }
+                    // Panels are D-pad surfaces only. The synthesised pointer that
+                    // used to float over Dock / Media Center / Keyboard / Tab
+                    // Overview is gone: it duplicated the D-pad's job on the same
+                    // widgets and could disagree with the D-pad selection. The
+                    // browser keeps its own page cursor, which is separate.
+                    //
+                    // `hot` stays wired so the panel arms below keep their existing
+                    // shape; with no pointer it is always false, meaning gamepad
+                    // bindings always own the button.
                     let hot = ui.pointer_hot();
                     match ui.focus() {
                         ui::Focus::Keyboard => {

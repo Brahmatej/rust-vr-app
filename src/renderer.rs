@@ -77,6 +77,9 @@ pub struct Renderer {
     pub projection_mode: u32,
     /// Dome wrap, applied ON TOP of `projection_mode`. Toggled with D-pad left.
     pub dome_enabled: bool,
+    /// egui textures whose free was deferred by one frame (see `render`): they are
+    /// still referenced by the previous frame's queued commands at free time.
+    pending_texture_frees: Vec<egui::TextureId>,
 
     // Web (browser) RGBA texture — shown on the VR screen when in web mode.
     web_texture: wgpu::Texture,
@@ -596,6 +599,7 @@ impl Renderer {
             stereo_mode: 0,
             projection_mode: 0,
             dome_enabled: false,
+            pending_texture_frees: Vec::new(),
 
             web_texture_view: web_texture.create_view(&wgpu::TextureViewDescriptor::default()),
             web_texture,
@@ -937,9 +941,23 @@ impl Renderer {
                 self.egui_renderer.render(render_pass_static, &paint_jobs, &screen_descriptor);
             }
             
-            for id in &full_output.textures_delta.free {
-                self.egui_renderer.free_texture(id);
+            // Textures freed THIS frame are still referenced by the render pass
+            // recorded just above, and `encoder` is not submitted until the end of
+            // render(). Freeing here destroyed the wgpu texture while those queued
+            // commands still pointed at it, which wgpu reported as
+            //   Queue::submit ... Texture with 'egui_texid_Managed(N)' has been destroyed
+            // every frame, and the leaked driver allocations behind those failed
+            // submits eventually aborted in vkCmdBeginRenderPass (SIGABRT in
+            // scudo::reportMapError, out of graphics memory).
+            //
+            // Defer them by one frame instead: anything freed now is released at
+            // the start of the NEXT render, by which point this frame's submit has
+            // completed and nothing references it.
+            for id in std::mem::take(&mut self.pending_texture_frees) {
+                self.egui_renderer.free_texture(&id);
             }
+            self.pending_texture_frees
+                .extend(full_output.textures_delta.free.iter().copied());
         }
         
         // 2. Clear Screen
