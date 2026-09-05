@@ -25,11 +25,14 @@ mod gamepad;
 mod thumbs;
 mod webview;
 
-/// Content zoom limits. The old 3.0 ceiling made the screen stop growing well
-/// before it filled the field of view on a wide panel; 8.0 lets it go properly
-/// cinema-sized, and the lower bound gets a bit more room to pull back too.
-const ZOOM_MIN: f32 = 0.3;
-const ZOOM_MAX: f32 = 8.0;
+/// Content zoom is UNCAPPED by explicit request: no upper bound at all, and
+/// content is allowed to grow past the field of view.
+///
+/// The only remaining floor is a small positive epsilon. Scale reaches the shader
+/// as a divisor for the angular modes and a multiplier for the planar ones, so
+/// zero or negative would collapse the mesh to a point or invert it — that is a
+/// degenerate-geometry guard, not a zoom limit.
+const ZOOM_MIN: f32 = 0.01;
 
 /// Main application state
 struct VRApp {
@@ -452,16 +455,13 @@ impl ApplicationHandler for VRApp {
                                 ui.file_browser.refresh_entries();
                                 ui.toggle_focus(ui::Focus::MediaCenter);
                             }
-                            // Per-tab viewport shape (the video-mode stereo binding
-                            // lives on the same key but only in Focus::Video).
-                            if gp.nav_right { ui.push(ui::Intent::CycleAspect); }
-                            if gp.nav_left  { ui.push(ui::Intent::NewTab); }
-                            // Global geometry / head-tracking bindings stay live.
-                            if gp.nav_up   { cycle_projection(ui); }
-                            if gp.nav_down {
-                                sensors::cycle_head_mode();
-                                info!("Head tracking mode -> {}", sensors::head_mode_label());
-                            }
+                            // Geometry is bound identically in every focus, so the
+                            // D-pad means one thing everywhere. (Per-tab browser
+                            // aspect used to sit on nav_right and was the source of
+                            // the "more than 4 shapes" cycle; new-tab moved to ○.)
+                            if gp.nav_right { cycle_projection(ui); }
+                            if gp.nav_left  { toggle_dome(ui); }
+                            if gp.nav_down  { cycle_stereo(ui); }
                         }
                         ui::Focus::Video => {
                             // No panel: Options opens the dock, Create the Media Center,
@@ -475,20 +475,13 @@ impl ApplicationHandler for VRApp {
                             if gp.play_pause   { toggle_playback(&self.app, &self.ndk_decoder); }
                             if gp.seek_back    { seek_relative(&self.app, &self.ndk_decoder, -10_000_000); }
                             if gp.seek_forward { seek_relative(&self.app, &self.ndk_decoder, 10_000_000); }
-                            if gp.nav_right {
-                                ui.params.stereo_mode = (ui.params.stereo_mode + 1) % ui::STEREO_MODES;
-                                info!("3D -> {}", ui::stereo_label(ui.params.stereo_mode));
-                            }
-                            if gp.nav_left {
-                                ui.params.stereo_mode =
-                                    (ui.params.stereo_mode + ui::STEREO_MODES - 1) % ui::STEREO_MODES;
-                                info!("3D -> {}", ui::stereo_label(ui.params.stereo_mode));
-                            }
-                            if gp.nav_up   { cycle_projection(ui); }
-                            if gp.nav_down {
-                                sensors::cycle_head_mode();
-                                info!("Head tracking mode -> {}", sensors::head_mode_label());
-                            }
+                            // Geometry lives entirely on the D-pad:
+                            //   right = projection (flat/180/360/vertical)
+                            //   left  = dome wrap on top of it
+                            //   down  = stereo layout
+                            if gp.nav_right { cycle_projection(ui); }
+                            if gp.nav_left  { toggle_dome(ui); }
+                            if gp.nav_down  { cycle_stereo(ui); }
                         }
                     }
 
@@ -502,8 +495,8 @@ impl ApplicationHandler for VRApp {
                     const TRIGGER_DEADZONE: f32 = 0.08;
                     const ZOOM_SPEED: f32 = 0.05;
                     if gp.r2_trigger > TRIGGER_DEADZONE {
-                        ui.params.content_scale =
-                            (ui.params.content_scale + ZOOM_SPEED * gp.r2_trigger).min(ZOOM_MAX);
+                        // No ceiling: zoom in as far as the user wants.
+                        ui.params.content_scale += ZOOM_SPEED * gp.r2_trigger;
                     }
                     if gp.l2_trigger > TRIGGER_DEADZONE {
                         ui.params.content_scale =
@@ -577,6 +570,8 @@ impl ApplicationHandler for VRApp {
                         .map(|u| u.params.stereo_mode as u32).unwrap_or(0);
                     renderer.projection_mode = self.vr_ui.as_ref()
                         .map(|u| u.params.projection_mode as u32).unwrap_or(0);
+                    renderer.dome_enabled = self.vr_ui.as_ref()
+                        .map(|u| u.params.dome_enabled).unwrap_or(false);
                     renderer.render(orientation, ui_data, distortion_params, content_scale);
                 }
                 
@@ -724,8 +719,9 @@ impl ApplicationHandler for VRApp {
                                 
                                 // Calculate zoom factor
                                 let scale_factor = (current_dist / initial_dist) as f32;
+                                // Uncapped: only the degenerate-geometry floor applies.
                                 let new_scale = (self.initial_content_scale * scale_factor)
-                                    .clamp(ZOOM_MIN, ZOOM_MAX);
+                                    .max(ZOOM_MIN);
                                 
                                 if let Some(ui) = &mut self.vr_ui {
                                     ui.params.content_scale = new_scale;
@@ -784,22 +780,42 @@ fn android_main(app: AndroidApp) {
     event_loop.run_app(&mut vr_app).expect("Event loop failed");
 }
 
-/// D-pad up: cycle the screen geometry (flat → 180 → 360 → vertical).
+/// D-pad RIGHT: cycle the screen geometry (flat → 180 → 360 → vertical).
 ///
-/// Entering a dome from mono: VR180/VR360 footage is overwhelmingly side-by-side
-/// stereo and the per-eye split lives in `stereo_mode` (independent of projection),
-/// so switching to a dome while still in 2D showed the whole packed frame to both
-/// eyes. Default to SBS; D-pad left/right still overrides.
+/// Exactly four modes. Dome is NOT one of them — it is an independent wrap toggled
+/// with D-pad left and applied on top of whichever of these is current.
+///
+/// Entering 180/360 from mono: that footage is overwhelmingly side-by-side stereo
+/// and the per-eye split lives in `stereo_mode` (independent of projection), so
+/// switching to it while still in 2D showed the whole packed frame to both eyes.
+/// Default to SBS; D-pad down still overrides.
 fn cycle_projection(ui: &mut ui::VrUi) {
     ui.params.projection_mode = (ui.params.projection_mode + 1) % ui::PROJECTION_MODES;
-    let dome = matches!(ui.params.projection_mode, 1 | 2);
-    if dome && ui.params.stereo_mode == 0 {
+    let angular = matches!(ui.params.projection_mode, 1 | 2);
+    if angular && ui.params.stereo_mode == 0 {
         ui.params.stereo_mode = 1;
-        info!("Dome: auto-enabling side-by-side");
+        info!("180/360: auto-enabling side-by-side");
     }
     info!("Projection -> {} ({})",
-        ui::projection_label(ui.params.projection_mode),
+        ui::projection_full_label(ui.params.projection_mode, ui.params.dome_enabled),
         ui::stereo_label(ui.params.stereo_mode));
+}
+
+/// D-pad LEFT: toggle the dome wrap on top of the current projection.
+fn toggle_dome(ui: &mut ui::VrUi) {
+    ui.params.dome_enabled = !ui.params.dome_enabled;
+    info!("Projection -> {}",
+        ui::projection_full_label(ui.params.projection_mode, ui.params.dome_enabled));
+}
+
+/// D-pad DOWN: cycle the stereo layout (2D → SBS → over-under).
+///
+/// This replaces the 8-way head-tracking basis debug cycle that used to sit here:
+/// the correct basis is now fixed in `sensors`, and leaving a debug control on a
+/// primary direction meant a stray press silently inverted head tracking.
+fn cycle_stereo(ui: &mut ui::VrUi) {
+    ui.params.stereo_mode = (ui.params.stereo_mode + 1) % ui::STEREO_MODES;
+    info!("3D -> {}", ui::stereo_label(ui.params.stereo_mode));
 }
 
 /// Toggle play/pause for BOTH pipelines.

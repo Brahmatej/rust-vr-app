@@ -61,35 +61,53 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let u_coord = f32(col + du) / f32(SCREEN_COLS);
     let v_coord = f32(row + dv) / f32(SCREEN_ROWS);
 
-    // Projection mode (camera.stereo.z): 0 = flat curved screen, 1 = 180° dome,
-    // 2 = 360° dome, 3 = vertical/portrait panel.
+    // Projection mode (camera.stereo.z): 0 = flat, 1 = 180, 2 = 360, 3 = vertical.
+    // Dome (camera.stereo.w) is an INDEPENDENT modifier applied on top of whichever
+    // of those is current, not a mode of its own.
     //
-    // For the dome modes the source is equirectangular, so the angular span is fixed
-    // by the FORMAT (pi for 180, 2pi for 360) rather than by the screen size - the
-    // image has to wrap the viewer at true scale or the geometry doesn't line up.
-    // This is what makes SBS 180/360 content actually work: each eye samples its half
-    // of the frame (handled in fs_main) mapped over a real hemisphere.
+    // For 180/360 the source is equirectangular, so the angular span is fixed by the
+    // FORMAT (pi for 180, 2pi for 360) rather than by the screen size: the image has
+    // to wrap the viewer at true scale or the geometry doesn't line up. Standard
+    // equirectangular convention is theta = 2*pi*u, phi = pi*(v - 0.5), which is what
+    // the sphere point below evaluates.
+    //
+    // Zoom is deliberately UNCAPPED. For flat/vertical the quad simply grows; for the
+    // angular modes zoom NARROWS the arc (optical zoom across the same view). Only a
+    // tiny epsilon guards division by zero - content is allowed to exceed the FOV.
     let pmode = camera.stereo.z;
+    let dome_on = camera.stereo.w > 0.5;
     var arc_h = screen_w / radius;
     var arc_v = screen_h / radius;
 
-    // Dome zoom: the span is set by the format, so zooming can't grow a quad the way
-    // it does for the flat screen - instead NARROW the arc, which magnifies the image
-    // across the same view (an optical zoom rather than a bigger screen). Clamped so
-    // it can't collapse to a point or wrap past the source.
-    let dome_zoom = clamp(scale, 0.35, 6.0);
+    let zoom = max(scale, 0.0001);
 
-    if (pmode > 0.5 && pmode < 1.5) {             // 180° dome
-        arc_h = 3.14159265 / dome_zoom;
-        arc_v = (3.14159265 * 0.5) / dome_zoom;
-    } else if (pmode > 1.5 && pmode < 2.5) {      // 360° dome
-        arc_h = 6.28318531 / dome_zoom;
-        arc_v = 3.14159265 / dome_zoom;
+    if (pmode > 0.5 && pmode < 1.5) {             // 180 equirectangular
+        arc_h = 3.14159265 / zoom;
+        arc_v = (3.14159265 * 0.5) / zoom;
+    } else if (pmode > 1.5 && pmode < 2.5) {      // 360 equirectangular
+        arc_h = 6.28318531 / zoom;
+        arc_v = 3.14159265 / zoom;
     } else if (pmode > 2.5) {                     // vertical / portrait
         // Tall panel: swap the aspect so portrait video fills the height.
         let vert_h = base_h * scale * 1.9;
         arc_v = vert_h / radius;
         arc_h = (vert_h / max(aspect, 0.1)) / radius;
+    }
+
+    // Dome modifier: wrap the CURRENT projection onto a spherical section rather
+    // than leaving it as a shallow plane. Flat/vertical are planar-ish arcs, so the
+    // dome widens them into a genuine curve around the viewer; 180/360 are already
+    // angular, so the dome deepens the wrap without changing their format span.
+    if (dome_on) {
+        if (pmode < 0.5 || pmode > 2.5) {
+            // Flat and vertical: broaden into a real dome section (~120 deg wide),
+            // preserving the source aspect so nothing is stretched.
+            let dome_h = 2.0943951 / zoom;        // 120 deg
+            arc_h = dome_h;
+            arc_v = dome_h / max(aspect, 0.1);
+        }
+        // 180/360 keep their format-defined span: the sphere mapping below already
+        // wraps them correctly, and overriding it would break equirectangular scale.
     }
 
     let theta = (u_coord - 0.5) * arc_h;

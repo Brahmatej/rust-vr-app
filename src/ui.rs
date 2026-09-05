@@ -17,9 +17,12 @@ pub struct VrParams {
     pub browser_engine:     i32,        // 0 = Chromium (unused), 1 = Firefox/Gecko
     // Stereoscopic video layout: 0 = mono, 1 = SBS, 2 = over-under.
     pub stereo_mode:        u8,
-    /// Screen geometry: 0 = flat curved screen, 1 = 180 dome, 2 = 360 dome,
-    /// 3 = vertical (portrait/tall) panel. Cycled with D-pad up.
+    /// Screen geometry: 0 = flat, 1 = 180, 2 = 360, 3 = vertical (portrait/tall).
+    /// Exactly four modes, cycled with D-pad RIGHT.
     pub projection_mode:    u8,
+    /// Dome wrap applied ON TOP of `projection_mode` (D-pad LEFT toggles it).
+    /// This is a modifier, not a projection of its own.
+    pub dome_enabled:       bool,
 }
 
 impl Default for VrParams {
@@ -34,19 +37,30 @@ impl Default for VrParams {
             browser_engine:     1,
             stereo_mode:        0,
             projection_mode:    0,
+            dome_enabled:       false,
         }
     }
 }
 
 pub const STEREO_MODES: u8 = 3;
+/// Flat, 180, 360, Vertical — exactly four. Dome is a separate modifier.
 pub const PROJECTION_MODES: u8 = 4;
 
 pub fn projection_label(mode: u8) -> &'static str {
     match mode {
-        1 => "180° Dome",
-        2 => "360° Dome",
+        1 => "180°",
+        2 => "360°",
         3 => "Vertical",
-        _ => "Flat Screen",
+        _ => "Flat",
+    }
+}
+
+/// Label including the dome modifier, e.g. "180° + Dome".
+pub fn projection_full_label(mode: u8, dome: bool) -> String {
+    if dome {
+        format!("{} + Dome", projection_label(mode))
+    } else {
+        projection_label(mode).to_string()
     }
 }
 
@@ -111,6 +125,12 @@ pub enum Intent {
     SelectTab(usize),
     /// Relative tab move (+1 next, -1 previous), wrapping.
     SwitchTab(i32),
+    /// Cycle the active tab's viewport shape (Java owns the list).
+    ///
+    /// Unbound from the D-pad: it shared nav_right with the video geometry, so the
+    /// two lists chained into one long cycle. The Java implementation and its
+    /// per-tab state are intact for a future menu entry.
+    #[allow(dead_code)]
     CycleAspect,
     /// Normalized (0..1) page coordinates.
     Tap(f32, f32),
@@ -1247,11 +1267,12 @@ impl VrUi {
                     let label = if sel == DockItem::Stereo3D {
                         stereo_label(self.params.stereo_mode)
                     } else { sel.label() };
-                    // The head-tracking basis mode is surfaced here so the user can
-                    // cycle it with D-pad down and report which one tracks correctly.
-                    let sub = format!("{}   ·   ↑ geometry   ↓ look [{}]",
-                        projection_label(self.params.projection_mode),
-                        crate::sensors::head_mode_label());
+                    // Geometry lives on the D-pad: right cycles the four projections,
+                    // left toggles the dome wrap over the current one, down cycles 3D.
+                    let sub = format!("{}   ·   → shape   ← dome   ↓ {}",
+                        projection_full_label(self.params.projection_mode,
+                                              self.params.dome_enabled),
+                        stereo_label(self.params.stereo_mode));
                     // M3E display-style label: large, tight, high-contrast.
                     ui.label(egui::RichText::new(label).size(34.0).strong().color(M3_ON_SURFACE));
                     ui.add_space(4.0);

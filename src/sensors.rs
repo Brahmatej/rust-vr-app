@@ -57,9 +57,15 @@ static DISPLAY_ROTATION: std::sync::atomic::AtomicI32 = std::sync::atomic::Atomi
 /// So: keep the 90 deg device_fix, drop the extra inverse.
 static HEAD_MODE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
+#[allow(dead_code)]
 pub const HEAD_MODE_COUNT: u32 = 8;
 
 /// Advance to the next basis mode. Returns the new mode.
+///
+/// No longer bound to a button: mode 1 is the correct basis for this headset and
+/// D-pad down now cycles the stereo layout. Kept as an on-device diagnostic for
+/// re-deriving the basis if the hardware or display orientation ever changes.
+#[allow(dead_code)]
 pub fn cycle_head_mode() -> u32 {
     let v = (HEAD_MODE.load(std::sync::atomic::Ordering::Relaxed) + 1) % HEAD_MODE_COUNT;
     HEAD_MODE.store(v, std::sync::atomic::Ordering::Relaxed);
