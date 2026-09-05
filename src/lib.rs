@@ -49,8 +49,6 @@ struct VRApp {
     initial_content_scale: f32,
     // NDK Video Decoder
     ndk_decoder: Option<video_ndk::NdkVideoDecoder>,
-    /// Previous R2 analog value, for edge-detecting the browser click.
-    prev_r2: f32,
     // Evdev Gamepad Reader
     #[allow(dead_code)]
     gamepad_reader: Option<gamepad::GamepadReader>,
@@ -73,7 +71,6 @@ impl VRApp {
             initial_pinch_distance: None,
             initial_content_scale: 1.0,
             ndk_decoder: None,
-            prev_r2: 0.0,
             gamepad_reader: Some(gamepad::GamepadReader::new()),
             stereo_mode: 0,
         }
@@ -197,6 +194,10 @@ impl ApplicationHandler for VRApp {
                         egui::Pos2::ZERO,
                         egui::vec2(2048.0, 2048.0),
                     ));
+                    // The headset has no touchscreen, so egui would never see a
+                    // pointer and every on-screen control would be dead. Feed it the
+                    // right-stick panel pointer (moves/clicks queued last frame).
+                    raw_input.events.extend(ui.take_pointer_events());
                     state.egui_ctx().begin_pass(raw_input);
 
                     // Media Center thumbnails (hardware-accelerated): upload finished
@@ -237,6 +238,27 @@ impl ApplicationHandler for VRApp {
                         if ui.web_browser.info_tick % 12 == 0 {
                             if let Some(snap) = webview::tab_snapshot(&self.app) {
                                 ui.sync_tabs(snap);
+                            }
+                        }
+                        // Tab previews: only the ACTIVE tab has a compositor
+                        // surface, so Java keeps a downscaled copy of each tab's
+                        // last on-screen frame. Pull ONE tab per frame (and only
+                        // while the grid is open) and re-upload only when Java's
+                        // sequence number says the picture actually changed.
+                        if ui.focus() == ui::Focus::TabOverview {
+                            let n = ui.web_browser.tabs.len();
+                            if n > 0 {
+                                let i = (ui.web_browser.info_tick as usize) % n;
+                                if let Some((w, h, seq, rgba)) = webview::tab_thumb(&self.app, i) {
+                                    if ui.tab_thumb_seq(i) != Some(seq) {
+                                        let img = egui::ColorImage::from_rgba_unmultiplied(
+                                            [w as usize, h as usize], &rgba);
+                                        let tex = state.egui_ctx().load_texture(
+                                            format!("tabthumb:{}", i), img,
+                                            egui::TextureOptions::LINEAR);
+                                        ui.set_tab_thumb(i, seq, tex);
+                                    }
+                                }
                             }
                         }
                     }
@@ -313,10 +335,6 @@ impl ApplicationHandler for VRApp {
                     // ── Gamepad (polled once per frame) ───────────────────────
                     let gp = gamepad::poll_actions();
 
-                    // R2 is an ANALOG axis on a DualSense; edge-detect it so a held
-                    // trigger clicks once rather than every frame.
-                    let r2_edge = gp.r2_trigger > 0.55 && self.prev_r2 <= 0.55;
-                    self.prev_r2 = gp.r2_trigger;
 
                     // Always-active, focus-independent.
                     if gp.reset_view {
@@ -330,6 +348,17 @@ impl ApplicationHandler for VRApp {
 
                     // ── Modal dispatch on the focus state machine ─────────────
                     // Exactly one arm runs, so no two surfaces can claim a button.
+                    //
+                    // In every PANEL focus the right stick drives a pointer over the
+                    // egui surface, and ✕ is its click. `pointer_hot` is egui's own
+                    // answer to "is the pointer over a widget?" — when it is, the
+                    // widget handles ✕ and the panel's gamepad binding stands down,
+                    // so a click can never fire two actions at once.
+                    if ui.pointer_active() {
+                        ui.move_ui_cursor(gp.right_stick_x, gp.right_stick_y);
+                        if gp.play_pause { ui.ui_click(); }
+                    }
+                    let hot = ui.pointer_hot();
                     match ui.focus() {
                         ui::Focus::Keyboard => {
                             // D-pad picks a key, X types it, O backspaces,
@@ -338,7 +367,12 @@ impl ApplicationHandler for VRApp {
                             if gp.nav_right { ui.keyboard.move_right(); }
                             if gp.nav_up    { ui.keyboard.move_up(); }
                             if gp.nav_down  { ui.keyboard.move_down(); }
-                            if gp.play_pause || gp.confirm { ui.keyboard.press(); }
+                            if (gp.play_pause && !hot) || gp.confirm {
+                                // The Search/Go key commits, exactly like Options.
+                                if ui.keyboard.press() == ui::KeyPress::Commit {
+                                    ui.keyboard_commit();
+                                }
+                            }
                             if gp.back          { ui.keyboard.backspace(); }
                             if gp.open_settings { ui.keyboard_commit(); }
                             if gp.toggle_ui     { let b = ui.base_focus(); ui.set_focus(b); }
@@ -348,7 +382,7 @@ impl ApplicationHandler for VRApp {
                             ui.file_browser.handle_stick(gp.left_stick_x);
                             if gp.nav_up   || gp.nav_left  { ui.file_browser.move_up(); }
                             if gp.nav_down || gp.nav_right { ui.file_browser.move_down(); }
-                            if gp.play_pause || gp.confirm { ui.media_select(); }
+                            if (gp.play_pause && !hot) || gp.confirm { ui.media_select(); }
                             if gp.back { ui.file_browser.go_back(); }
                             // Create closes it again (it opened it), Options swaps to the dock.
                             if gp.open_file_picker { let b = ui.base_focus(); ui.set_focus(b); }
@@ -359,7 +393,7 @@ impl ApplicationHandler for VRApp {
                             // D-pad left/right move the highlight, X activates, Options/O close.
                             if gp.nav_left  { ui.dock_move_left(); }
                             if gp.nav_right { ui.dock_move_right(); }
-                            if gp.play_pause || gp.confirm { ui.dock_activate(); }
+                            if (gp.play_pause && !hot) || gp.confirm { ui.dock_activate(); }
                             if gp.back || gp.open_settings { let b = ui.base_focus(); ui.set_focus(b); }
                             if gp.toggle_ui { ui.set_focus(ui::Focus::Keyboard); }
                         }
@@ -368,23 +402,36 @@ impl ApplicationHandler for VRApp {
                             if gp.nav_right { ui.web_browser.overview_move(1); }
                             if gp.nav_up    { ui.web_browser.overview_move(-2); }
                             if gp.nav_down  { ui.web_browser.overview_move(2); }
-                            if gp.play_pause {
+                            // ✕ opens the highlighted tab — unless the pointer is on
+                            // a widget, in which case the ✕/＋ button it is over
+                            // gets the click instead.
+                            if gp.play_pause && !hot {
                                 let i = ui.web_browser.overview_sel;
                                 ui.push(ui::Intent::SelectTab(i));
                                 ui.set_focus(ui::Focus::Browser);
                             }
                             if gp.back {
+                                // Closing shifts everything above down one, so the
+                                // highlight has to come down with it or it lands on
+                                // the wrong card (or past the end).
                                 let i = ui.web_browser.overview_sel;
+                                let n = ui.web_browser.tabs.len();
+                                ui.web_browser.overview_sel = i.min(n.saturating_sub(2));
                                 ui.push(ui::Intent::CloseTabAt(i));
                             }
-                            if gp.confirm || gp.toggle_ui { ui.set_focus(ui::Focus::Browser); }
+                            // □ adds a tab from the grid — previously there was no
+                            // binding at all, so "add tab" simply could not be done
+                            // from here.
+                            if gp.confirm { ui.push(ui::Intent::NewTab); }
+                            if gp.toggle_ui { ui.set_focus(ui::Focus::Browser); }
                             if gp.open_settings { ui.set_focus(ui::Focus::Dock); }
                         }
                         ui::Focus::Browser => {
                             // Stick cursor: RIGHT stick moves it, LEFT stick scrolls.
                             ui.web_browser.move_cursor(gp.right_stick_x, gp.right_stick_y);
                             ui.browser_scroll(gp.left_stick_x, gp.left_stick_y);
-                            if r2_edge || gp.play_pause { ui.browser_click(); }
+                            // Click is ✕ ONLY: R2 is the global zoom-in axis.
+                            if gp.play_pause { ui.browser_click(); }
                             if gp.seek_back    { ui.push(ui::Intent::SwitchTab(-1)); }
                             if gp.seek_forward { ui.push(ui::Intent::SwitchTab(1)); }
                             if gp.back         { ui.push(ui::Intent::BrowserBack); }
@@ -438,11 +485,16 @@ impl ApplicationHandler for VRApp {
                         }
                     }
 
-                    // Zoom (L2/R2 analog). Suppressed while the browser has focus —
-                    // there R2 is the click button.
+                    // Zoom (L2/R2 analog), live in EVERY focus.
+                    //
+                    // R2 used to double as the browser click, so zoom-IN was
+                    // suppressed in Focus::Browser while zoom-OUT (L2) still worked
+                    // — the exact asymmetry the user hit, and it disappeared as soon
+                    // as the keyboard took focus. Browser clicking is ✕ only now, so
+                    // R2 is free to mean one thing everywhere.
                     const TRIGGER_DEADZONE: f32 = 0.08;
                     const ZOOM_SPEED: f32 = 0.05;
-                    if ui.focus() != ui::Focus::Browser && gp.r2_trigger > TRIGGER_DEADZONE {
+                    if gp.r2_trigger > TRIGGER_DEADZONE {
                         ui.params.content_scale =
                             (ui.params.content_scale + ZOOM_SPEED * gp.r2_trigger).min(ZOOM_MAX);
                     }

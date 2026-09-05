@@ -44,8 +44,20 @@ public class GeckoViewManager {
     private static final String TAG      = "VRAppJava";
     private static final int    WEB_W    = 1920;
     private static final int    WEB_H    = 1080;
-    private static final int    MAX_TABS = 4;   // each tab = its own compositor (heavy)
+    /**
+     * Tab cap. Each tab owns a GeckoSession *and* an ImageReader, so the cost is
+     * real: at 1920x1080 RGBX with 2 buffers that is ~16.6 MB of graphics memory
+     * per tab plus the session itself. 6 tabs ≈ 100 MB of readers, which the
+     * headset handles; going much past that risks the compositor. The buffer
+     * count was dropped 3 -> 2 (acquireLatestImage only ever needs double
+     * buffering) precisely to pay for the two extra tabs.
+     */
+    private static final int    MAX_TABS = 6;
+    private static final int    READER_BUFFERS = 2;
     private static final String HOME_URL = "https://www.google.com";
+
+    /** Width of the cached per-tab preview handed to the VR tab overview. */
+    private static final int    THUMB_W  = 240;
 
     /** Per-tab viewport shapes, cycled with D-pad right. */
     private static final int[][] ASPECTS = {
@@ -83,6 +95,30 @@ public class GeckoViewManager {
 
     private final java.util.List<Tab> tabs = new java.util.ArrayList<>();
     private int activeTab = 0;
+
+    /**
+     * Per-tab preview bitmaps (12-byte header w/h/seq + RGBA), indexed by tab
+     * index. Written on the ImageReader thread, read by the VR render thread via
+     * {@link #getTabThumb(int)} — an atomic array so neither side ever walks the
+     * `tabs` list off the main thread (GeckoView is UI-thread affine).
+     */
+    private final java.util.concurrent.atomic.AtomicReferenceArray<byte[]> thumbs =
+        new java.util.concurrent.atomic.AtomicReferenceArray<>(MAX_TABS);
+    private int thumbTick = 0;
+
+    /**
+     * Snapshot of {@link #getTabInfo()} published from the MAIN thread.
+     *
+     * The render thread used to call getTabInfo() directly, walking Gecko-owned
+     * state off the UI thread. Now the UI thread republishes this string whenever
+     * the model changes (and on a slow tick for progress/title), and the render
+     * thread only ever reads this one volatile reference.
+     */
+    private volatile String tabInfoSnapshot = "0\t0\t100\t0\t" + MAX_TABS + "\n";
+
+    /** Last-resort feedback for the VR chrome: e.g. "Tab limit reached (6)". */
+    private volatile String notice = "";
+    private volatile long   noticeAtMs = 0;
 
     private byte[] frameBuf;
     private volatile boolean running = false;
@@ -160,6 +196,7 @@ public class GeckoViewManager {
         }
         activeTab = Math.max(0, Math.min(store.loadActiveTab(), tabs.size() - 1));
         activateTab(activeTab);
+        mainHandler.post(infoTicker);
 
         Log.i(TAG, "GeckoViewManager initialised " + WEB_W + "x" + WEB_H
             + " with " + tabs.size() + " tab(s), active " + activeTab
@@ -201,7 +238,7 @@ public class GeckoViewManager {
         tab.h = ASPECTS[tab.aspect][1];
 
         // Own capture pipeline (RGBX_8888 = Gecko compositor format).
-        tab.reader = ImageReader.newInstance(tab.w, tab.h, PixelFormat.RGBX_8888, 3);
+        tab.reader = ImageReader.newInstance(tab.w, tab.h, PixelFormat.RGBX_8888, READER_BUFFERS);
         tab.reader.setOnImageAvailableListener(r -> onImageAvailable(r, tab), readerHandler);
 
         tab.session = (existing != null) ? existing : new GeckoSession(sessionSettings());
@@ -326,14 +363,31 @@ public class GeckoViewManager {
     /** Make a tab active: resume it, pause others, load lazily. No display juggling. */
     private void activateTab(int idx) {
         if (idx < 0 || idx >= tabs.size()) return;
+
+        // Snapshot the OUTGOING tab first: `frameBuf` still holds its last frame,
+        // and once it is backgrounded it will never produce another one.
+        Tab prev = active();
+        if (prev != null && activeTab != idx && frameBuf != null) {
+            captureThumb(activeTab, prev.w, prev.h);
+        }
+
         activeTab = idx;
         Tab tab = tabs.get(idx);
 
+        // Exactly ONE tab may be active, focused and composited. Leaving the old
+        // tab focused/active is what left its content painted underneath the new
+        // one — two live surfaces racing into the same renderer texture.
         for (int i = 0; i < tabs.size(); i++) {
-            try { tabs.get(i).session.setActive(i == idx); } catch (Exception e) {}
+            Tab t = tabs.get(i);
+            try { t.session.setActive(i == idx); }  catch (Exception e) {}
+            try { t.session.setFocused(i == idx); } catch (Exception e) {}
         }
         try { tab.session.getTextInput().setView(imeView); } catch (Exception e) {}
-        try { tab.session.setFocused(true); } catch (Exception e) {}
+
+        // Blank the renderer's page texture: the incoming tab paints nothing until
+        // its first frame lands, and without this the previous tab's pixels stay on
+        // screen underneath it.
+        clearRendererFrame(tab.w, tab.h);
 
         if (!tab.loaded) {
             String want = sanitize(tab.url);
@@ -341,12 +395,32 @@ public class GeckoViewManager {
             tab.session.loadUri(want);
             tab.loaded = true;
         }
+        publishTabInfo();
         Log.i(TAG, "GECKO TAB active=" + activeTab + " of " + tabs.size());
+    }
+
+    /**
+     * Push one opaque blank frame so the renderer stops showing the tab we just
+     * left. Uses a small buffer: the Rust side scales whatever it is given.
+     */
+    private void clearRendererFrame(int w, int h) {
+        if (!(context instanceof MainActivity) || !active) return;
+        int cw = 64, ch = Math.max(1, 64 * h / Math.max(1, w));
+        byte[] blank = new byte[cw * ch * 4];
+        for (int i = 0; i < blank.length; i += 4) {
+            blank[i] = 24; blank[i + 1] = 24; blank[i + 2] = 28; blank[i + 3] = (byte) 0xFF;
+        }
+        ((MainActivity) context).onWebFrame(cw, ch, blank);
     }
 
     public void newTab(String url) {
         mainHandler.post(() -> {
-            if (tabs.size() >= MAX_TABS) { Log.i(TAG, "newTab: at MAX_TABS"); return; }
+            if (tabs.size() >= MAX_TABS) {
+                // Used to fail silently, which read as a dead button.
+                notice("Tab limit reached (" + MAX_TABS + ") — close one first");
+                Log.i(TAG, "newTab: at MAX_TABS");
+                return;
+            }
             Tab old = active();
             if (old != null && old.inFullscreen) old.session.exitFullScreen();
             createTab(url, null, old != null ? old.aspect : 0);
@@ -399,14 +473,25 @@ public class GeckoViewManager {
             t.url = HOME_URL;
             t.title = "";
             t.loaded = true;
+            thumbs.set(0, null);
+            notice("Last tab — reset to home");
+            publishTabInfo();
             Log.i(TAG, "closeTab: last tab kept, reset to home");
             return;
         }
         Tab dead = tabs.remove(index);
         destroyTab(dead);
+        shiftThumbsAfterRemoval(index);
+        // Re-index: closing a tab BELOW the active one shifts it down by one;
+        // closing the active one (or anything above) leaves the index alone, then
+        // gets clamped into the shortened list.
         if (activeTab > index) activeTab--;
         if (activeTab >= tabs.size()) activeTab = tabs.size() - 1;
-        activateTab(activeTab);
+        // activateTab() early-returns when the index is unchanged in the caller's
+        // eyes, so force the full re-activation path by re-running it here.
+        int want = activeTab;
+        activeTab = -1;
+        activateTab(want);
         Log.i(TAG, "Closed Gecko tab " + index + "; " + tabs.size() + " left, active " + activeTab);
     }
 
@@ -438,17 +523,43 @@ public class GeckoViewManager {
     }
 
     /**
-     * Snapshot of the whole tab model for the VR UI, as one string:
-     *   line 0: activeIndex\tcount\tprogress\ttextFocused
+     * The render thread's view of the tab model. Returns the string most recently
+     * published by the MAIN thread — it never touches Gecko state itself.
+     */
+    public String getTabInfo() { return tabInfoSnapshot; }
+
+    /** Republish {@link #tabInfoSnapshot} + a heartbeat. MAIN THREAD ONLY. */
+    private final Runnable infoTicker = new Runnable() {
+        @Override public void run() {
+            if (!running) return;
+            publishTabInfo();
+            mainHandler.postDelayed(this, 150);
+        }
+    };
+
+    /** Show a short message in the VR browser chrome (e.g. the tab-cap refusal). */
+    private void notice(String msg) {
+        notice = msg == null ? "" : msg;
+        noticeAtMs = SystemClock.uptimeMillis();
+        publishTabInfo();
+    }
+
+    /**
+     * Build the whole tab model for the VR UI, as one string. MAIN THREAD ONLY:
+     *   line 0: activeIndex\tcount\tprogress\ttextFocused\tmaxTabs\tnotice
      *   line N: url\ttitle\taspectLabel\taspectIndex
      */
-    public String getTabInfo() {
+    private void publishTabInfo() {
         StringBuilder sb = new StringBuilder();
         Tab a = active();
+        // Notices are transient: 4 s and they stop being reported.
+        String note = (SystemClock.uptimeMillis() - noticeAtMs < 4000) ? notice : "";
         sb.append(activeTab).append('\t')
           .append(tabs.size()).append('\t')
           .append(a != null ? a.progress : 100).append('\t')
-          .append(a != null && a.textFocused ? 1 : 0).append('\n');
+          .append(a != null && a.textFocused ? 1 : 0).append('\t')
+          .append(MAX_TABS).append('\t')
+          .append(note.replace('\t', ' ').replace('\n', ' ')).append('\n');
         for (Tab t : tabs) {
             String u = t.url == null ? "" : t.url;
             String ti = t.title == null ? "" : t.title;
@@ -457,7 +568,66 @@ public class GeckoViewManager {
               .append(ASPECT_LABELS[t.aspect]).append('\t')
               .append(t.aspect).append('\n');
         }
-        return sb.toString();
+        tabInfoSnapshot = sb.toString();
+    }
+
+    // ── Per-tab previews ───────────────────────────────────────────────────────
+
+    /**
+     * Cached preview of tab `index`: 12-byte big-endian header (width, height,
+     * sequence) followed by tightly-packed RGBA, or null if that tab has not been
+     * seen on screen yet. Safe to call from any thread.
+     */
+    public byte[] getTabThumb(int index) {
+        if (index < 0 || index >= MAX_TABS) return null;
+        return thumbs.get(index);
+    }
+
+    /**
+     * Box-downscale the frame we just captured for the active tab into its preview
+     * slot. Runs on the ImageReader thread (never the render thread) and only
+     * every ~45 frames, so the cost is negligible and previews are at most a
+     * second stale — which is what makes tab previews possible at all: only the
+     * ACTIVE tab has a compositor surface, so the only way to show a preview of a
+     * backgrounded tab is to have kept one from while it was in front.
+     */
+    private void captureThumb(int index, int srcW, int srcH) {
+        if (index < 0 || index >= MAX_TABS || srcW <= 0 || srcH <= 0) return;
+        int tw = Math.min(THUMB_W, srcW);
+        int th = Math.max(1, (int) ((long) tw * srcH / srcW));
+        byte[] out = new byte[12 + tw * th * 4];
+        putInt(out, 0, tw);
+        putInt(out, 4, th);
+        putInt(out, 8, (int) (SystemClock.uptimeMillis() / 100));
+
+        int srcRow = srcW * 4;
+        for (int y = 0; y < th; y++) {
+            int sy = y * srcH / th;
+            int sBase = sy * srcRow;
+            int dBase = 12 + y * tw * 4;
+            for (int x = 0; x < tw; x++) {
+                int s = sBase + (x * srcW / tw) * 4;
+                int d = dBase + x * 4;
+                out[d]     = frameBuf[s];
+                out[d + 1] = frameBuf[s + 1];
+                out[d + 2] = frameBuf[s + 2];
+                out[d + 3] = (byte) 0xFF;   // RGBX: the 4th channel is padding
+            }
+        }
+        thumbs.set(index, out);
+    }
+
+    private static void putInt(byte[] b, int off, int v) {
+        b[off]     = (byte) (v >>> 24);
+        b[off + 1] = (byte) (v >>> 16);
+        b[off + 2] = (byte) (v >>> 8);
+        b[off + 3] = (byte) v;
+    }
+
+    /** Keep preview slots aligned with tab indices after a tab is removed. */
+    private void shiftThumbsAfterRemoval(int removed) {
+        for (int i = removed; i < MAX_TABS - 1; i++) thumbs.set(i, thumbs.get(i + 1));
+        thumbs.set(MAX_TABS - 1, null);
     }
 
     // ── Tab-state persistence (delegated to SessionStore) ─────────────────────
@@ -505,6 +675,11 @@ public class GeckoViewManager {
             if (context instanceof MainActivity) {
                 ((MainActivity) context).onWebFrame(w, h, frameBuf);
             }
+
+            // Keep a downscaled preview of whatever is on screen, so that when this
+            // tab is backgrounded (and loses its only compositor output) the tab
+            // overview still has something real to show.
+            if (++thumbTick % 45 == 0) captureThumb(activeTab, w, h);
         } catch (Exception e) {
             Log.e(TAG, "Gecko onImageAvailable error: " + e.getMessage());
         } finally {
@@ -638,7 +813,7 @@ public class GeckoViewManager {
         try {
             ImageReader old = t.reader;
             final Tab ft = t;
-            t.reader = ImageReader.newInstance(w, h, PixelFormat.RGBX_8888, 3);
+            t.reader = ImageReader.newInstance(w, h, PixelFormat.RGBX_8888, READER_BUFFERS);
             t.reader.setOnImageAvailableListener(r -> onImageAvailable(r, ft), readerHandler);
             t.display.surfaceChanged(
                 new GeckoDisplay.SurfaceInfo.Builder(t.reader.getSurface())

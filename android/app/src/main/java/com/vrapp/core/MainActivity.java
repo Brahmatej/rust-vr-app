@@ -575,9 +575,22 @@ public class MainActivity extends NativeActivity {
      */
     public String webViewTabInfo() {
         if (this.geckoReady) {
+            // Reads one volatile snapshot published by the UI thread — safe from
+            // the render thread, unlike walking Gecko's own state.
             return this.geckoViewManager.getTabInfo();
         }
         return "";
+    }
+
+    /**
+     * Cached preview of a tab: 12-byte big-endian header (w, h, seq) + RGBA, or
+     * null. Read-only snapshot, safe from the render thread.
+     */
+    public byte[] webViewTabThumb(int i) {
+        if (this.geckoReady) {
+            return this.geckoViewManager.getTabThumb(i);
+        }
+        return null;
     }
 
     public void setBrowserActive(boolean z) {

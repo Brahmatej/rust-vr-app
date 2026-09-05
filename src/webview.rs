@@ -225,7 +225,41 @@ pub struct TabSnapshot {
     pub active:       usize,
     pub progress:     i32,
     pub text_focused: bool,
+    /// Java's tab cap, so the UI can say *why* a new tab was refused.
+    pub max_tabs:     usize,
+    /// Transient message from the engine (tab cap hit, last tab reset, …).
+    pub notice:       String,
     pub tabs:         Vec<TabInfo>,
+}
+
+/// A cached per-tab preview: (width, height, sequence, RGBA pixels).
+///
+/// Only the ACTIVE tab has a compositor surface, so Java keeps a downscaled copy
+/// of each tab's last on-screen frame; `seq` changes when that copy is refreshed,
+/// which is what lets the UI cache the GPU texture instead of re-uploading.
+pub fn tab_thumb(app: &AndroidApp, index: usize) -> Option<(u32, u32, u32, Vec<u8>)> {
+    let mut out = None;
+    with_activity(app, |env, activity| {
+        let raw = match env.call_method(activity, "webViewTabThumb", "(I)[B",
+                                        &[JValue::Int(index as i32)]) {
+            Ok(v) => v,
+            Err(e) => { error!("webview: webViewTabThumb failed: {:?}", e); return; }
+        };
+        let obj = match raw.l() { Ok(o) => o, Err(_) => return };
+        if obj.is_null() { return; }
+        let arr = jni::objects::JByteArray::from(obj);
+        let len = match env.get_array_length(&arr) { Ok(l) if l > 12 => l as usize, _ => return };
+        let mut bytes = vec![0u8; len];
+        let dst: &mut [i8] =
+            unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut i8, len) };
+        if env.get_byte_array_region(&arr, 0, dst).is_err() { return; }
+        let be = |o: usize| u32::from_be_bytes([bytes[o], bytes[o+1], bytes[o+2], bytes[o+3]]);
+        let (w, h, seq) = (be(0), be(4), be(8));
+        if w == 0 || h == 0 || (w as usize) * (h as usize) * 4 + 12 > len { return; }
+        bytes.drain(..12);
+        out = Some((w, h, seq, bytes));
+    });
+    out
 }
 
 /// Poll Java for the current tab model. Cheap enough for a few times a second;
@@ -251,6 +285,8 @@ pub fn tab_snapshot(app: &AndroidApp) -> Option<TabSnapshot> {
             active:       head[0].parse().unwrap_or(0),
             progress:     head[2].parse().unwrap_or(100),
             text_focused: head[3] == "1",
+            max_tabs:     head.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
+            notice:       head.get(5).copied().unwrap_or("").to_string(),
             tabs:         Vec::new(),
         };
         for line in lines {

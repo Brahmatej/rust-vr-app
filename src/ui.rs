@@ -239,6 +239,66 @@ pub struct FileBrowser {
     pub carousel_pos:   f32,
     pub nav_cooldown:   u8,
     pub nav_hold:       u16,
+    /// In-flight recursive media scan (Movies / Music). The walk runs on a worker
+    /// thread — `/storage/emulated/0` can be tens of thousands of files and the
+    /// render thread must not wait on it.
+    scan_rx:            Option<std::sync::mpsc::Receiver<Vec<FileEntry>>>,
+}
+
+/// Where the recursive media scan starts, and how far it is allowed to go.
+const MEDIA_ROOT: &str = "/storage/emulated/0";
+const SCAN_MAX_DEPTH: usize = 5;
+const SCAN_MAX_FILES: usize = 600;
+
+/// Directories that are never worth walking: app sandboxes, caches and thumbnail
+/// stores hold no user media but plenty of files.
+fn skip_dir(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(name,
+            "Android" | "LOST.DIR" | "cache" | "Cache" | "obb" | "data"
+            | "Notifications" | "Ringtones" | "Alarms" | "System Volume Information")
+}
+
+fn media_kind_of(name: &str) -> Option<MediaKind> {
+    let ext = name.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+    if matches!(ext.as_str(), "mp4"|"mkv"|"avi"|"webm"|"mov"|"m4v"|"3gp"|"ts"|"flv") {
+        Some(MediaKind::Video)
+    } else if matches!(ext.as_str(), "mp3"|"flac"|"wav"|"aac"|"ogg"|"m4a"|"opus"|"wma") {
+        Some(MediaKind::Audio)
+    } else { None }
+}
+
+/// Bounded recursive walk collecting files of one kind.
+///
+/// The top level of `/storage/emulated/0` holds no media at all — everything is a
+/// folder down (Download, Movies, DCIM, …), which is why the Movies/Music tabs
+/// used to come up empty. Depth and file count are both capped so a pathological
+/// tree cannot turn this into a hang.
+fn scan_media(dir: &std::path::Path, want: MediaKind, out: &mut Vec<FileEntry>, depth: usize) {
+    if out.len() >= SCAN_MAX_FILES || depth > SCAN_MAX_DEPTH { return; }
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    for entry in rd.flatten() {
+        if out.len() >= SCAN_MAX_FILES { return; }
+        let path = entry.path();
+        let name = match path.file_name() {
+            Some(n) => n.to_string_lossy().to_string(),
+            None => continue,
+        };
+        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        if is_dir {
+            if !skip_dir(&name) { subdirs.push(path); }
+        } else if !name.starts_with('.') && media_kind_of(&name) == Some(want) {
+            let size_mb = std::fs::metadata(&path)
+                .map(|m| m.len() as f32 / 1_048_576.0).unwrap_or(0.0);
+            out.push(FileEntry { name, path, is_dir: false, kind: want,
+                size_mb, thumbnail: None, glow: None, thumb_requested: false });
+        }
+    }
+    for sub in subdirs {
+        scan_media(&sub, want, out, depth + 1);
+        if out.len() >= SCAN_MAX_FILES { return; }
+    }
 }
 
 impl FileBrowser {
@@ -255,13 +315,77 @@ impl FileBrowser {
             carousel_pos:   0.0,
             nav_cooldown:   0,
             nav_hold:       0,
+            scan_rx:        None,
         };
         b.refresh_entries();
         b
     }
 
+    /// Switch category. Movies/Music aggregate media recursively; Files stays a
+    /// literal directory browser, so the two need different scans.
+    pub fn set_category(&mut self, cat: Category) {
+        if self.category == cat { return; }
+        self.category = cat;
+        self.selected_index = 0;
+        self.carousel_pos = 0.0;
+        self.refresh_entries();
+    }
+
+    /// Pick up a finished background scan. Called once per frame while the Media
+    /// Center is on screen.
+    pub fn poll_scan(&mut self) {
+        let Some(rx) = &self.scan_rx else { return };
+        match rx.try_recv() {
+            Ok(mut found) => {
+                found.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                if self.sort_by == SortBy::Size {
+                    found.sort_by(|a, b| b.size_mb.partial_cmp(&a.size_mb)
+                        .unwrap_or(std::cmp::Ordering::Equal));
+                }
+                log::info!("FileBrowser: recursive scan found {} media file(s)", found.len());
+                self.entries = found;
+                self.selected_index = 0;
+                self.carousel_pos = 0.0;
+                self.error_msg = if self.entries.is_empty() {
+                    Some("No media found under /storage/emulated/0.".into())
+                } else { None };
+                self.scan_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.scan_rx = None; }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// True while a background media scan is running (drives the "Scanning…" copy).
+    pub fn scanning(&self) -> bool { self.scan_rx.is_some() }
+
     pub fn refresh_entries(&mut self) {
         use log::{info, error};
+
+        // Movies / Music are aggregations, not directories: kick off a bounded
+        // recursive walk on a worker thread and show the result when it lands.
+        let want = match self.category {
+            Category::Movies => Some(MediaKind::Video),
+            Category::Music  => Some(MediaKind::Audio),
+            Category::Files  => None,
+        };
+        if let Some(want) = want {
+            self.entries.clear();
+            self.selected_index = 0;
+            self.error_msg = None;
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.scan_rx = Some(rx);
+            std::thread::spawn(move || {
+                let mut out = Vec::new();
+                scan_media(std::path::Path::new(MEDIA_ROOT), want, &mut out, 0);
+                let _ = tx.send(out);
+            });
+            info!("FileBrowser: recursive {} scan started under {}",
+                if want == MediaKind::Video { "video" } else { "audio" }, MEDIA_ROOT);
+            return;
+        }
+        self.scan_rx = None;
+
         let prev_path = self.entries.get(self.selected_index).map(|e| e.path.clone());
         self.entries.clear();
         self.selected_index = 0;
@@ -479,6 +603,14 @@ pub struct WebBrowserState {
     // ── Tab overview (Safari-style grid) ─────────────────────────────────────
     /// Highlighted card in the grid. Visibility of the grid itself is `Focus`.
     pub overview_sel:     usize,
+    /// Java's tab cap, mirrored so the UI can explain a refused new tab.
+    pub max_tabs:         usize,
+    /// Transient engine message ("Tab limit reached…"), mirrored from Java.
+    pub notice:           String,
+    /// Per-tab previews, keyed by tab index: (sequence, uploaded texture). The
+    /// sequence is Java's; when it changes we re-upload, otherwise we reuse the
+    /// texture, so the overview costs one small upload per second at most.
+    pub thumbs:           std::collections::HashMap<usize, (u32, egui::TextureHandle)>,
 }
 
 impl Default for WebBrowserState {
@@ -497,6 +629,9 @@ impl Default for WebBrowserState {
             cursor_x: 0.5, cursor_y: 0.5,
             click_flash: 0,
             overview_sel: 0,
+            max_tabs: 0,
+            notice: String::new(),
+            thumbs: std::collections::HashMap::new(),
         }
     }
 }
@@ -525,6 +660,12 @@ impl WebBrowserState {
         self.progress     = snap.progress;
         self.text_focused = snap.text_focused;
         self.tabs         = snap.tabs;
+        self.max_tabs     = snap.max_tabs;
+        self.notice       = snap.notice;
+        // Previews are keyed by tab index; drop any that no longer exist so a
+        // closed tab's picture can't reappear under a different tab.
+        let n = self.tabs.len();
+        self.thumbs.retain(|k, _| *k < n);
         if let Some(t) = self.tabs.get(self.active_tab) {
             self.plane_aspect = aspect_from_label(&t.aspect);
             if !t.url.is_empty() { self.current_url = t.url.clone(); }
@@ -550,6 +691,26 @@ const KB_ROWS: [&str; 4] = [
     "zxcvbnm",
 ];
 
+/// The bottom action row, mirroring an Android IME: a wide space bar, a delete
+/// key, and the accented Search/Go key that commits the buffer. It is a normal
+/// row as far as D-pad navigation is concerned (`row == KB_ROWS.len()`), so it is
+/// reachable by pressing down from "zxcvbnm", and each key is also clickable.
+const KB_ACTION_ROW: usize = KB_ROWS.len();
+const KB_ACTIONS: [(&str, KeyAction); 4] = [
+    ("space", KeyAction::Space),
+    (".",     KeyAction::Dot),
+    ("⌫",     KeyAction::Backspace),
+    ("Search ⏎", KeyAction::Search),
+];
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum KeyAction { Space, Dot, Backspace, Search }
+
+/// What pressing a key asked the surrounding UI to do. `Commit` is the only one
+/// the caller has to act on (it routes to browser navigation).
+#[derive(Clone, Copy, PartialEq)]
+pub enum KeyPress { Handled, Commit }
+
 #[derive(Default)]
 pub struct VrKeyboard {
     pub row: usize,
@@ -561,26 +722,47 @@ impl VrKeyboard {
     fn current_char(&self) -> Option<char> {
         KB_ROWS.get(self.row).and_then(|r| r.chars().nth(self.col))
     }
+    /// Number of keys in a row, action row included.
+    fn row_len(row: usize) -> usize {
+        if row == KB_ACTION_ROW { KB_ACTIONS.len() }
+        else { KB_ROWS.get(row).map(|r| r.chars().count()).unwrap_or(1) }
+    }
     pub fn move_left(&mut self)  { if self.col > 0 { self.col -= 1; } }
     pub fn move_right(&mut self) {
-        let len = KB_ROWS[self.row].chars().count();
-        if self.col + 1 < len { self.col += 1; }
+        if self.col + 1 < Self::row_len(self.row) { self.col += 1; }
     }
     pub fn move_up(&mut self)   { if self.row > 0 { self.row -= 1; self.clamp_col(); } }
-    pub fn move_down(&mut self) { if self.row + 1 < KB_ROWS.len() { self.row += 1; self.clamp_col(); } }
-    fn clamp_col(&mut self) {
-        let len = KB_ROWS[self.row].chars().count().saturating_sub(1);
-        if self.col > len { self.col = len; }
+    pub fn move_down(&mut self) {
+        if self.row < KB_ACTION_ROW { self.row += 1; self.clamp_col(); }
     }
-    pub fn press(&mut self) {
+    fn clamp_col(&mut self) {
+        let last = Self::row_len(self.row).saturating_sub(1);
+        if self.col > last { self.col = last; }
+    }
+    /// Type the highlighted key. Returns `Commit` for the Search/Go key so the
+    /// caller can route the buffer to the browser.
+    pub fn press(&mut self) -> KeyPress {
+        if self.row == KB_ACTION_ROW {
+            return match KB_ACTIONS.get(self.col).map(|(_, a)| *a) {
+                Some(KeyAction::Space)     => { self.input.push(' '); KeyPress::Handled }
+                Some(KeyAction::Dot)       => { self.input.push('.'); KeyPress::Handled }
+                Some(KeyAction::Backspace) => { self.input.pop(); KeyPress::Handled }
+                Some(KeyAction::Search)    => KeyPress::Commit,
+                None => KeyPress::Handled,
+            };
+        }
         if let Some(c) = self.current_char() { self.input.push(c); }
+        KeyPress::Handled
     }
     pub fn backspace(&mut self) { self.input.pop(); }
     /// Hand the typed string to the caller and reset. The keyboard owns no
     /// "committed" flag of its own — the caller turns this into an intent.
     pub fn submit(&mut self) -> String { std::mem::take(&mut self.input) }
 
-    fn render(&self, ui: &mut egui::Ui) {
+    /// Draw the keyboard. Returns `Some(Commit)` when a click (cursor) landed on
+    /// the Search key, so the caller can commit exactly as the gamepad path does.
+    fn render(&mut self, ui: &mut egui::Ui) -> Option<KeyPress> {
+        let mut out = None;
         for (r, row) in KB_ROWS.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -595,10 +777,49 @@ impl VrKeyboard {
                         // Same shape morph as the dock: rounded square -> pill.
                         .rounding(Rounding::same(if selected { size / 2.0 } else { 18.0 }))
                         .fill(if selected { M3_PRIMARY } else { M3_SURFACE_HIGH });
-                    ui.add(btn);
+                    let resp = ui.add(btn);
+                    if resp.hovered() { self.row = r; self.col = c; }
+                    if resp.clicked() { self.row = r; self.col = c; out = Some(self.press()); }
                 }
             });
         }
+        // Action row: space / . / delete / the accented Search key.
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            for (c, (label, act)) in KB_ACTIONS.iter().enumerate() {
+                let selected = self.row == KB_ACTION_ROW && self.col == c;
+                let is_go = *act == KeyAction::Search;
+                let w = match act {
+                    KeyAction::Space  => 250.0,
+                    KeyAction::Search => 230.0,
+                    _                 => 90.0,
+                };
+                let h = if selected { 72.0 } else { 60.0 };
+                // The Go key is the primary action, so it carries the accent
+                // even when it is not the selected key — exactly how Android's
+                // IME enter key reads.
+                let (bg, fg) = if selected { (M3_PRIMARY, M3_ON_PRIMARY) }
+                    else if is_go { (M3_PRIMARY, M3_ON_PRIMARY) }
+                    else { (M3_SURFACE_HIGH, M3_ON_SURFACE) };
+                let btn = egui::Button::new(
+                        egui::RichText::new(*label).size(if is_go { 28.0 } else { 24.0 })
+                            .strong().color(fg))
+                    .min_size(egui::vec2(w, h))
+                    .rounding(Rounding::same(if selected { h / 2.0 } else { 18.0 }))
+                    .stroke(if selected {
+                        Stroke::new(3.0, Color32::from_white_alpha(150))
+                    } else { Stroke::NONE })
+                    .fill(bg);
+                let resp = ui.add(btn);
+                if resp.hovered() { self.row = KB_ACTION_ROW; self.col = c; }
+                if resp.clicked() {
+                    self.row = KB_ACTION_ROW; self.col = c;
+                    out = Some(self.press());
+                }
+            }
+        });
+        out
     }
 }
 
@@ -619,6 +840,22 @@ pub struct VrUi {
     /// enough — the UI is single-threaded and lives entirely on the render thread,
     /// so no lock or atomic is warranted here.
     intents: std::collections::VecDeque<Intent>,
+
+    // ── Panel pointer ─────────────────────────────────────────────────────────
+    //
+    // The headset has no touchscreen, so egui never received a pointer and every
+    // on-screen control (tab close ✕, ＋ New, keyboard keys) was dead — only the
+    // gamepad bindings did anything. The right stick now drives a pointer in
+    // panel-space and we synthesise egui pointer events for it.
+    /// Pointer position inside the 2048² UI canvas.
+    ui_cursor: egui::Pos2,
+    /// Synthesised egui events awaiting exactly one drain by lib.rs — the same
+    /// queue-and-drain discipline as `intents`, so nothing can fire twice.
+    pointer_events: Vec<egui::Event>,
+    /// Set once per frame from `ctx.wants_pointer_input()`: true when the pointer
+    /// is over an interactive widget. Purely a cache of egui's own answer, read by
+    /// lib.rs so the ✕ button drives the widget instead of the gamepad binding.
+    pointer_hot: bool,
 }
 
 impl VrUi {
@@ -638,7 +875,59 @@ impl VrUi {
             keyboard: VrKeyboard::default(),
             dock_selected: 0,
             intents: std::collections::VecDeque::new(),
+            ui_cursor: egui::pos2(UI_PANEL_PX * 0.5, UI_PANEL_PX * 0.5),
+            pointer_events: Vec::new(),
+            pointer_hot: false,
         }
+    }
+
+    // ── Panel pointer ─────────────────────────────────────────────────────────
+
+    /// True while a panel (not the page / bare video) owns input, i.e. while the
+    /// synthesised pointer should exist at all.
+    pub fn pointer_active(&self) -> bool {
+        matches!(self.focus,
+            Focus::Dock | Focus::MediaCenter | Focus::Keyboard | Focus::TabOverview)
+    }
+
+    /// Is the pointer over a clickable widget right now? (egui's own verdict.)
+    pub fn pointer_hot(&self) -> bool { self.pointer_hot }
+
+    /// Right stick moves the panel pointer. Same feel as the browser cursor:
+    /// quadratic ramp for precision near the deadzone, fast travel at the rim.
+    pub fn move_ui_cursor(&mut self, sx: f32, sy: f32) {
+        const DEAD: f32 = 0.15;
+        let mag = (sx * sx + sy * sy).sqrt();
+        if mag < DEAD { return; }
+        let norm = ((mag - DEAD) / (1.0 - DEAD)).clamp(0.0, 1.0);
+        let speed = (6.0 * norm + 46.0 * norm * norm) * UI_PANEL_PX / 2048.0;
+        self.ui_cursor.x = (self.ui_cursor.x + sx / mag * speed).clamp(0.0, UI_PANEL_PX);
+        self.ui_cursor.y = (self.ui_cursor.y + sy / mag * speed).clamp(0.0, UI_PANEL_PX);
+    }
+
+    /// Synthesise a full click (down+up) at the pointer.
+    pub fn ui_click(&mut self) {
+        let pos = self.ui_cursor;
+        for pressed in [true, false] {
+            self.pointer_events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+    }
+
+    /// Events for this frame's `RawInput`. Drained exactly once by lib.rs.
+    pub fn take_pointer_events(&mut self) -> Vec<egui::Event> {
+        let mut ev = std::mem::take(&mut self.pointer_events);
+        if self.pointer_active() {
+            // Keep hover alive: egui forgets the pointer without a move event.
+            ev.insert(0, egui::Event::PointerMoved(self.ui_cursor));
+        } else {
+            ev.push(egui::Event::PointerGone);
+        }
+        ev
     }
 
     fn apply_theme(ctx: &Context) {
@@ -719,6 +1008,16 @@ impl VrUi {
         if !was_focused && self.web_browser.text_focused && self.focus == Focus::Browser {
             self.set_focus(Focus::Keyboard);
         }
+    }
+
+    /// Sequence number of the cached preview for tab `i`, if we have one. lib.rs
+    /// compares it against Java's to decide whether a re-upload is needed.
+    pub fn tab_thumb_seq(&self, i: usize) -> Option<u32> {
+        self.web_browser.thumbs.get(&i).map(|(s, _)| *s)
+    }
+
+    pub fn set_tab_thumb(&mut self, i: usize, seq: u32, tex: egui::TextureHandle) {
+        self.web_browser.thumbs.insert(i, (seq, tex));
     }
 
     /// Open the highlighted Media Center entry (directory or file).
@@ -820,6 +1119,18 @@ impl VrUi {
             Focus::TabOverview => self.render_tab_overview(ctx),
             Focus::Video | Focus::Browser => {}
         }
+
+        // Panel pointer: draw it on top of whatever panel is open, and remember
+        // egui's verdict on whether it is over a widget (see `pointer_hot`).
+        if self.pointer_active() {
+            let p = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground, egui::Id::new("ui_cursor")));
+            let c = self.ui_cursor;
+            p.circle_filled(c, 14.0, Color32::from_black_alpha(120));
+            p.circle_filled(c, 9.0, if self.pointer_hot { M3_ON_PRIMARY } else { M3_PRIMARY });
+            p.circle_stroke(c, 14.0, Stroke::new(2.5, Color32::from_white_alpha(210)));
+        }
+        self.pointer_hot = ctx.wants_pointer_input();
     }
 
     // ── macOS-style dock ──────────────────────────────────────────────────────
@@ -936,6 +1247,9 @@ impl VrUi {
 
     // ── Media Center — Nokia coverflow carousel (light frosted glass) ─────────
     fn render_media_center(&mut self, ctx: &Context) {
+        // Adopt a finished background scan before laying anything out.
+        self.file_browser.poll_scan();
+        if self.file_browser.scanning() { ctx.request_repaint(); }
         let txt    = Color32::from_rgb(26, 26, 32);
         let txt2   = Color32::from_rgb(108, 110, 120);
         let accent = Color32::from_rgb(46, 107, 230);
@@ -976,16 +1290,18 @@ impl VrUi {
                                     .color(if on { Color32::WHITE } else { txt2 }))
                             .min_size(egui::vec2(134.0, 40.0)).rounding(Rounding::same(20.0))
                             .fill(if on { accent } else { Color32::from_black_alpha(12) });
-                        if ui.add(pill).clicked() {
-                            self.file_browser.category = cat;
-                            self.file_browser.selected_index = 0;
-                        }
+                        if ui.add(pill).clicked() { self.file_browser.set_category(cat); }
                         ui.add_space(8.0);
                     }
                 });
                 ui.add_space(10.0);
-                // Breadcrumb
-                let path_str = self.file_browser.current_path.to_string_lossy().to_string();
+                // Breadcrumb: for Movies/Music this is an aggregate, not a folder.
+                let path_str = match self.file_browser.category {
+                    Category::Files => self.file_browser.current_path.to_string_lossy().to_string(),
+                    _ if self.file_browser.scanning() =>
+                        format!("Scanning {} …", MEDIA_ROOT),
+                    _ => format!("All media under {}", MEDIA_ROOT),
+                };
                 ui.label(egui::RichText::new(path_str).size(13.0).color(txt2));
                 ui.add_space(8.0);
 
@@ -1073,6 +1389,9 @@ impl VrUi {
                         }
 
                         let resp = ui.interact(rect, ui.id().with(("cover", ei)), egui::Sense::click());
+                        // Hovering brings a tile to the front of the coverflow, so
+                        // the pointer and the D-pad share one selection.
+                        if resp.hovered() && !focused { select_index = Some(ei); }
                         if resp.clicked() {
                             if focused { open_index = Some(ei); } else { select_index = Some(ei); }
                         }
@@ -1128,6 +1447,7 @@ impl VrUi {
             self.web_browser.url_bar.clone()
         } else { self.web_browser.current_url.clone() };
         let progress = self.web_browser.progress;
+        let notice   = self.web_browser.notice.clone();
         let aspect_label = self.web_browser.tabs.get(active)
             .map(|t| t.aspect.clone()).unwrap_or_else(|| "16:9".into());
         let titles: Vec<String> = self.web_browser.tabs.iter().enumerate()
@@ -1173,6 +1493,11 @@ impl VrUi {
                     ui.label(egui::RichText::new("🔒").size(15.0).color(Color32::from_rgb(148, 143, 153)));
                     ui.label(egui::RichText::new(truncate(&url, 90)).size(18.0).color(M3_ON_SURFACE));
                 });
+                // Engine feedback, e.g. a new tab refused at the cap — otherwise
+                // the ＋ button just looks broken.
+                if !notice.trim().is_empty() {
+                    ui.label(egui::RichText::new(&notice).size(17.0).strong().color(M3_PRIMARY));
+                }
                 // Loading progress
                 if progress < 100 {
                     let (r, _) = ui.allocate_exact_size(
@@ -1239,11 +1564,18 @@ impl VrUi {
     fn render_tab_overview(&mut self, ctx: &Context) {
         let sel = self.web_browser.overview_sel;
         let active = self.web_browser.active_tab;
-        let tabs: Vec<(String, String, String)> = self.web_browser.tabs.iter()
-            .map(|t| (t.title.clone(), t.url.clone(), t.aspect.clone()))
-            .collect();
+        // Snapshot everything the grid needs (previews included) up front, so the
+        // closure below can still call `self.push(...)` without a borrow fight.
+        let tabs: Vec<(String, String, String, Option<egui::TextureHandle>)> =
+            self.web_browser.tabs.iter().enumerate()
+                .map(|(i, t)| (t.title.clone(), t.url.clone(), t.aspect.clone(),
+                               self.web_browser.thumbs.get(&i).map(|(_, tex)| tex.clone())))
+                .collect();
+        let notice = self.web_browser.notice.clone();
+        let max_tabs = self.web_browser.max_tabs;
         let mut pick: Option<usize> = None;
         let mut close: Option<usize> = None;
+        let mut hover: Option<usize> = None;
 
         egui::Window::new("tab_overview")
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -1258,18 +1590,37 @@ impl VrUi {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Tabs").size(38.0).strong().color(M3_ON_SURFACE));
                     ui.add_space(14.0);
-                    ui.label(egui::RichText::new(format!("{} open", tabs.len()))
+                    let count = if max_tabs > 0 {
+                        format!("{} of {} open", tabs.len(), max_tabs)
+                    } else { format!("{} open", tabs.len()) };
+                    ui.label(egui::RichText::new(count)
                         .size(20.0).color(Color32::from_rgb(160, 154, 168)));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let full = max_tabs > 0 && tabs.len() >= max_tabs;
                         if ui.add(egui::Button::new(egui::RichText::new("＋ New").size(20.0)
-                                .color(M3_ON_SECONDARY_CONTAINER))
+                                .color(if full { Color32::from_rgb(140, 136, 148) }
+                                       else { M3_ON_PRIMARY }))
                             .min_size(egui::vec2(140.0, 52.0)).rounding(Rounding::same(26.0))
-                            .fill(M3_SECONDARY_CONTAINER)).clicked() {
+                            .fill(if full { M3_SURFACE_HIGH } else { M3_PRIMARY })).clicked() {
+                            // Even at the cap: Java answers with a notice, which is
+                            // what turns a dead button into an explanation.
                             self.push(Intent::NewTab);
-                            self.set_focus(Focus::Browser);
+                            if !full { self.set_focus(Focus::Browser); }
                         }
                     });
                 });
+                // Engine feedback (tab cap reached, last tab reset, …).
+                if !notice.trim().is_empty() {
+                    ui.add_space(8.0);
+                    egui::Frame::none()
+                        .fill(M3_SECONDARY_CONTAINER)
+                        .rounding(Rounding::same(16.0))
+                        .inner_margin(Margin::symmetric(16.0, 8.0))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(&notice).size(19.0)
+                                .color(M3_ON_SECONDARY_CONTAINER));
+                        });
+                }
                 ui.add_space(20.0);
 
                 // Card grid. Each card's preview box takes the shape of THAT tab's
@@ -1281,7 +1632,7 @@ impl VrUi {
                     ui.horizontal(|ui| {
                         for col in 0..COLS {
                             let i = row * COLS + col;
-                            let Some((title, url, aspect)) = tabs.get(i) else { continue };
+                            let Some((title, url, aspect, thumb)) = tabs.get(i) else { continue };
                             let is_sel = i == sel;
                             let (card, _) = ui.allocate_exact_size(
                                 egui::vec2(CARD_W, BOX_H + 96.0), egui::Sense::hover());
@@ -1291,8 +1642,6 @@ impl VrUi {
                             if is_sel {
                                 p.rect_stroke(card, Rounding::same(24.0), Stroke::new(3.0, M3_PRIMARY));
                             }
-                            // Shaped preview placeholder (no live per-tab capture:
-                            // only the active tab renders a surface).
                             let a = aspect_from_label(aspect);
                             let bh = BOX_H - 24.0;
                             let bw = (bh * a).min(CARD_W - 48.0);
@@ -1301,13 +1650,22 @@ impl VrUi {
                                 egui::pos2(card.center().x, card.min.y + 16.0 + BOX_H * 0.5),
                                 egui::vec2(bw, bh));
                             p.rect_filled(bx, Rounding::same(14.0), Color32::from_rgb(38, 36, 44));
+                            let host = short_host(url);
+                            // Real preview: the last frame this tab painted while it
+                            // was in front (Java keeps a downscaled copy, since a
+                            // backgrounded tab has no compositor surface at all).
+                            if let Some(tex) = thumb {
+                                p.image(tex.id(), bx,
+                                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                    Color32::WHITE);
+                            } else {
+                                p.text(bx.center(), egui::Align2::CENTER_CENTER,
+                                    host.chars().next().unwrap_or('•').to_uppercase().to_string(),
+                                    FontId::new(64.0, FontFamily::Proportional),
+                                    Color32::from_rgb(120, 116, 130));
+                            }
                             p.rect_stroke(bx, Rounding::same(14.0),
                                 Stroke::new(1.5, Color32::from_white_alpha(30)));
-                            let host = short_host(url);
-                            p.text(bx.center(), egui::Align2::CENTER_CENTER,
-                                host.chars().next().unwrap_or('•').to_uppercase().to_string(),
-                                FontId::new(64.0, FontFamily::Proportional),
-                                Color32::from_rgb(120, 116, 130));
                             p.text(egui::pos2(bx.max.x - 8.0, bx.min.y + 8.0),
                                 egui::Align2::RIGHT_TOP, aspect,
                                 FontId::new(17.0, FontFamily::Proportional), M3_PRIMARY);
@@ -1330,10 +1688,23 @@ impl VrUi {
                             p.circle_filled(x_c, 20.0, Color32::from_black_alpha(140));
                             p.text(x_c, egui::Align2::CENTER_CENTER, "✕",
                                 FontId::new(20.0, FontFamily::Proportional), M3_ERROR);
-                            if ui.interact(egui::Rect::from_center_size(x_c, egui::vec2(44.0, 44.0)),
-                                    ui.id().with(("tabx", i)), egui::Sense::click()).clicked() {
+                            // Close first: its hit box sits inside the card, so it
+                            // has to win the interaction, and the card must only be
+                            // consulted when the ✕ was not hit.
+                            let x_resp = ui.interact(
+                                egui::Rect::from_center_size(x_c, egui::vec2(56.0, 56.0)),
+                                ui.id().with(("tabx", i)), egui::Sense::click());
+                            let card_resp =
+                                ui.interact(card, ui.id().with(("tab", i)), egui::Sense::click());
+                            if x_resp.hovered() {
+                                p.circle_stroke(x_c, 22.0, Stroke::new(2.5, M3_ERROR));
+                            }
+                            // Hovering a card moves the D-pad highlight with it, so
+                            // the pointer and the gamepad never disagree.
+                            if x_resp.hovered() || card_resp.hovered() { hover = Some(i); }
+                            if x_resp.clicked() {
                                 close = Some(i);
-                            } else if ui.interact(card, ui.id().with(("tab", i)), egui::Sense::click()).clicked() {
+                            } else if card_resp.clicked() {
                                 pick = Some(i);
                             }
                             ui.add_space(16.0);
@@ -1344,20 +1715,24 @@ impl VrUi {
 
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(
-                        "◀ ▶ / D-pad: choose    ✕: open    ○: close tab    □ / △: back to page")
+                        "R-stick pointer   ✕ open / click   ○ close tab   □ new tab   △ back to page")
                     .size(18.0).color(Color32::from_rgb(160, 154, 168)));
             });
 
+        if let Some(i) = hover { self.web_browser.overview_sel = i; }
         if let Some(i) = pick {
             self.push(Intent::SelectTab(i));
             self.set_focus(Focus::Browser);
         }
         if let Some(i) = close {
+            self.web_browser.overview_sel =
+                i.min(self.web_browser.tabs.len().saturating_sub(2));
             self.push(Intent::CloseTabAt(i));
         }
     }
 
     fn render_keyboard(&mut self, ctx: &Context) {
+        let mut hit: Option<KeyPress> = None;
         egui::Window::new("keyboard")
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .resizable(false).collapsible(false).title_bar(false)
@@ -1383,11 +1758,13 @@ impl VrUi {
                         ui.label(egui::RichText::new(text).size(26.0).color(col));
                     });
                 ui.add_space(14.0);
-                self.keyboard.render(ui);
+                hit = self.keyboard.render(ui);
                 ui.add_space(10.0);
-                ui.label(egui::RichText::new("X type   ○ delete   Options go   △ close")
+                ui.label(egui::RichText::new(
+                        "X type   ○ delete   ↓ to Search key   Options go   △ close")
                     .size(18.0).color(Color32::from_rgb(148, 143, 153)));
             });
+        if hit == Some(KeyPress::Commit) { self.keyboard_commit(); }
     }
 
     fn icon_btn(ui: &mut egui::Ui, icon: &str) -> egui::Response {
